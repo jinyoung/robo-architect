@@ -1,6 +1,7 @@
 <script setup>
 import { ref, computed, watch, onUnmounted } from 'vue'
 import { useNavigatorStore } from '../stores/navigator'
+import StepReviewPanel from './StepReviewPanel.vue'
 
 const props = defineProps({
   modelValue: {
@@ -13,19 +14,32 @@ const emit = defineEmits(['update:modelValue', 'complete'])
 
 const navigatorStore = useNavigatorStore()
 
+// =============================================================================
 // State
+// =============================================================================
+
+// File upload state
 const dragActive = ref(false)
 const file = ref(null)
 const textContent = ref('')
 const inputMode = ref('file') // 'file' or 'text'
 const isUploading = ref(false)
-const isProcessing = ref(false)
+
+// Session state
 const sessionId = ref(null)
-const progress = ref(0)
-const currentPhase = ref('')
-const currentMessage = ref('')
-const createdItems = ref([])
 const eventSource = ref(null)
+
+// Step workflow state
+const currentStep = ref('')
+const currentStepLabel = ref('')
+const isProcessing = ref(false)
+const waitingForReview = ref(false)
+const progress = ref(0)
+const currentMessage = ref('')
+const reviewItems = ref([])
+const createdItems = ref([])
+
+// UI state
 const error = ref(null)
 const summary = ref(null)
 const isPanelMinimized = ref(false)
@@ -36,7 +50,25 @@ const existingDataStats = ref(null)
 const isLoadingStats = ref(false)
 const isClearing = ref(false)
 
+// =============================================================================
+// Step labels
+// =============================================================================
+
+const STEP_LABELS = {
+  user_stories: 'User Story 추출',
+  bounded_contexts: 'Bounded Context 식별',
+  user_story_mapping: 'User Story - BC 매핑',
+  aggregates: 'Aggregate 추출',
+  commands: 'Command 추출',
+  events: 'Event 추출',
+  policies: 'Policy 식별',
+  complete: '완료'
+}
+
+// =============================================================================
 // Computed
+// =============================================================================
+
 const isOpen = computed({
   get: () => props.modelValue,
   set: (val) => emit('update:modelValue', val)
@@ -49,41 +81,28 @@ const canSubmit = computed(() => {
   return textContent.value.trim().length > 10
 })
 
-const phaseLabel = computed(() => {
-  const labels = {
-    'upload': '업로드 중',
-    'parsing': '문서 파싱',
-    'extracting_user_stories': 'User Story 추출',
-    'identifying_bc': 'BC 식별',
-    'extracting_aggregates': 'Aggregate 추출',
-    'extracting_commands': 'Command 추출',
-    'extracting_events': 'Event 추출',
-    'identifying_policies': 'Policy 식별',
-    'saving': '저장 중',
-    'complete': '완료',
-    'error': '오류'
-  }
-  return labels[currentPhase.value] || currentPhase.value
-})
-
-// Show floating panel when processing or has summary
 const showFloatingPanel = computed(() => {
-  return isProcessing.value || summary.value !== null
+  return isProcessing.value || waitingForReview.value || summary.value !== null || (error.value !== null && sessionId.value !== null)
 })
 
-// Has existing data
 const hasExistingData = computed(() => {
   return existingDataStats.value && existingDataStats.value.total > 0
 })
 
-// Watch for modal open to check existing data
+// =============================================================================
+// Watchers
+// =============================================================================
+
 watch(isOpen, async (newVal) => {
   if (newVal) {
     await checkExistingData()
   }
 })
 
-// Methods
+// =============================================================================
+// File handling
+// =============================================================================
+
 function handleDragOver(e) {
   e.preventDefault()
   dragActive.value = true
@@ -131,11 +150,14 @@ function removeFile() {
   file.value = null
 }
 
-// Check for existing data in Neo4j
+// =============================================================================
+// Data management
+// =============================================================================
+
 async function checkExistingData() {
   isLoadingStats.value = true
   try {
-    const response = await fetch('/api/graph/stats')
+    const response = await fetch('/api/ingest/stats')
     if (response.ok) {
       existingDataStats.value = await response.json()
     }
@@ -147,13 +169,12 @@ async function checkExistingData() {
   }
 }
 
-// Clear all existing data from Neo4j
 async function clearExistingData() {
   isClearing.value = true
   try {
-    const response = await fetch('/api/graph/clear', { method: 'DELETE' })
+    const response = await fetch('/api/ingest/clear-all', { method: 'DELETE' })
     if (response.ok) {
-      existingDataStats.value = { total: 0, by_type: {} }
+      existingDataStats.value = { total: 0, counts: {} }
       navigatorStore.clearAll()
       return true
     }
@@ -166,7 +187,6 @@ async function clearExistingData() {
   }
 }
 
-// Handle start button click
 function handleStartClick() {
   if (hasExistingData.value) {
     showClearConfirm.value = true
@@ -175,7 +195,6 @@ function handleStartClick() {
   }
 }
 
-// User chose to clear existing data and proceed
 async function confirmClearAndStart() {
   showClearConfirm.value = false
   const cleared = await clearExistingData()
@@ -184,17 +203,22 @@ async function confirmClearAndStart() {
   }
 }
 
-// User chose to cancel
 function cancelClear() {
   showClearConfirm.value = false
 }
+
+// =============================================================================
+// Ingestion workflow
+// =============================================================================
 
 async function startIngestion() {
   error.value = null
   isUploading.value = true
   createdItems.value = []
+  reviewItems.value = []
   summary.value = null
   isPanelMinimized.value = false
+  waitingForReview.value = false
   
   try {
     const formData = new FormData()
@@ -236,71 +260,160 @@ async function startIngestion() {
 function connectToStream(sid) {
   eventSource.value = new EventSource(`/api/ingest/stream/${sid}`)
   
-  eventSource.value.addEventListener('progress', (e) => {
+  eventSource.value.addEventListener('step', (e) => {
     const data = JSON.parse(e.data)
     
-    currentPhase.value = data.phase
+    currentStep.value = data.step
+    currentStepLabel.value = STEP_LABELS[data.step] || data.step
     currentMessage.value = data.message
     progress.value = data.progress
     
-    // Handle created objects
-    if (data.data?.object) {
-      const obj = data.data.object
-      createdItems.value.push(obj)
+    // Handle different statuses
+    if (data.status === 'processing') {
+      waitingForReview.value = false
+      isProcessing.value = true
       
-      // Trigger navigator updates for dynamic display
-      if (obj.type === 'UserStory') {
-        navigatorStore.addUserStory(obj)
-      } else if (obj.type === 'BoundedContext') {
-        navigatorStore.addContext(obj)
-      } else if (obj.type === 'Aggregate') {
-        navigatorStore.addAggregate(obj)
-      } else if (obj.type === 'Command') {
-        navigatorStore.addCommand(obj)
-      } else if (obj.type === 'Event') {
-        navigatorStore.addEvent(obj)
-      } else if (obj.type === 'Policy') {
-        navigatorStore.addPolicy(obj)
+      // Handle object creation for navigator
+      if (data.data?.object) {
+        const obj = data.data.object
+        createdItems.value.push(obj)
+        updateNavigator(obj, data.data.type)
       }
     }
     
-    // Handle User Story assignment to BC (move animation)
-    if (data.data?.type === 'UserStoryAssigned') {
-      const assignment = data.data.object
-      navigatorStore.assignUserStoryToBC(
-        assignment.id,
-        assignment.targetBcId,
-        assignment.targetBcName
-      )
-    }
-    
-    // Handle summary
-    if (data.data?.summary) {
-      summary.value = data.data.summary
-    }
-    
-    // Handle completion
-    if (data.phase === 'complete') {
+    if (data.status === 'review_required') {
+      waitingForReview.value = true
       isProcessing.value = false
+      reviewItems.value = data.items || []
+    }
+    
+    if (data.status === 'completed') {
+      isProcessing.value = false
+      waitingForReview.value = false
+      
+      if (data.data?.summary) {
+        summary.value = data.data.summary
+      }
+      
       closeStream()
       navigatorStore.refreshAll()
     }
     
-    // Handle error
-    if (data.phase === 'error') {
+    if (data.status === 'error') {
       error.value = data.message
       isProcessing.value = false
+      waitingForReview.value = false
       closeStream()
     }
   })
   
   eventSource.value.onerror = () => {
-    if (isProcessing.value) {
+    if (isProcessing.value || waitingForReview.value) {
       error.value = '연결이 끊어졌습니다'
     }
     closeStream()
   }
 }
+
+function updateNavigator(obj, type) {
+  // Trigger navigator updates for dynamic display
+  if (obj.type === 'UserStory' || type === 'UserStory') {
+    navigatorStore.addUserStory(obj)
+  } else if (obj.type === 'BoundedContext' || type === 'BoundedContext') {
+    navigatorStore.addContext(obj)
+  } else if (obj.type === 'Aggregate' || type === 'Aggregate') {
+    navigatorStore.addAggregate(obj)
+  } else if (obj.type === 'Command' || type === 'Command') {
+    navigatorStore.addCommand(obj)
+  } else if (obj.type === 'Event' || type === 'Event') {
+    navigatorStore.addEvent(obj)
+  } else if (obj.type === 'Policy' || type === 'Policy') {
+    navigatorStore.addPolicy(obj)
+  } else if (type === 'UserStoryAssigned') {
+    navigatorStore.assignUserStoryToBC(
+      obj.id,
+      obj.targetBcId,
+      obj.targetBcName
+    )
+  }
+}
+
+// =============================================================================
+// Review actions
+// =============================================================================
+
+async function handleApprove() {
+  if (!sessionId.value) return
+  
+  // Clear any previous error
+  error.value = null
+  
+  // Set processing state first to prevent panel from closing
+  isProcessing.value = true
+  
+  try {
+    const response = await fetch(`/api/ingest/${sessionId.value}/review`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'approve' })
+    })
+    
+    if (!response.ok) {
+      const errData = await response.json()
+      throw new Error(errData.detail || 'Failed to approve')
+    }
+    
+    // Successfully approved - SSE stream will continue automatically
+    waitingForReview.value = false
+    reviewItems.value = []
+    
+  } catch (e) {
+    // On error, stay in review mode so user can retry
+    error.value = e.message
+    isProcessing.value = false
+    waitingForReview.value = true
+  }
+}
+
+async function handleRegenerate(feedback) {
+  if (!sessionId.value || !feedback) return
+  
+  // Clear any previous error
+  error.value = null
+  
+  // Set processing state first
+  isProcessing.value = true
+  
+  try {
+    const response = await fetch(`/api/ingest/${sessionId.value}/review`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ 
+        action: 'regenerate',
+        feedback: feedback
+      })
+    })
+    
+    if (!response.ok) {
+      const errData = await response.json()
+      throw new Error(errData.detail || 'Failed to regenerate')
+    }
+    
+    // Successfully submitted - SSE stream will regenerate the current step
+    waitingForReview.value = false
+    reviewItems.value = []
+    
+  } catch (e) {
+    // On error, stay in review mode so user can retry
+    error.value = e.message
+    isProcessing.value = false
+    waitingForReview.value = true
+  }
+}
+
+// =============================================================================
+// UI helpers
+// =============================================================================
 
 function closeStream() {
   if (eventSource.value) {
@@ -310,7 +423,6 @@ function closeStream() {
 }
 
 function closeModal() {
-  // Reset state
   file.value = null
   textContent.value = ''
   error.value = null
@@ -319,20 +431,23 @@ function closeModal() {
 }
 
 function closeFloatingPanel() {
-  if (isProcessing.value) {
+  if (isProcessing.value || waitingForReview.value) {
     if (!confirm('진행 중인 작업이 있습니다. 정말 닫으시겠습니까?')) {
       return
     }
     closeStream()
     isProcessing.value = false
+    waitingForReview.value = false
   }
   
   // Reset state
   progress.value = 0
-  currentPhase.value = ''
+  currentStep.value = ''
   currentMessage.value = ''
   createdItems.value = []
+  reviewItems.value = []
   summary.value = null
+  sessionId.value = null
   
   emit('complete')
 }
@@ -357,12 +472,14 @@ function getTypeClass(type) {
   return `item-icon--${type.toLowerCase()}`
 }
 
-// Cleanup on unmount
 onUnmounted(() => {
   closeStream()
 })
 
-// Sample requirements text
+// =============================================================================
+// Sample data
+// =============================================================================
+
 const sampleText = `# 온라인 쇼핑몰 요구사항
 
 ## 1. 주문 관리
@@ -397,7 +514,7 @@ function useSample() {
   <!-- Upload Dialog (initial file selection) - Blocking Modal -->
   <Teleport to="body">
     <Transition name="modal">
-      <div v-if="isOpen && !isProcessing" class="modal-overlay" @click.self="closeModal">
+      <div v-if="isOpen && !isProcessing && !waitingForReview" class="modal-overlay" @click.self="closeModal">
         <div class="modal-container">
           <!-- Header -->
           <div class="modal-header">
@@ -447,7 +564,7 @@ function useSample() {
                 새로운 요구사항을 분석하기 전에 기존 데이터를 모두 삭제해야 합니다.
               </p>
               <div class="clear-confirm-stats">
-                <div v-for="(count, type) in existingDataStats.by_type" :key="type" class="stat-chip">
+                <div v-for="(count, type) in existingDataStats.counts" :key="type" class="stat-chip">
                   <span class="stat-chip-label">{{ type }}</span>
                   <span class="stat-chip-value">{{ count }}</span>
                 </div>
@@ -475,7 +592,7 @@ function useSample() {
               </div>
             </div>
             
-            <!-- Normal upload UI (hidden during confirm) -->
+            <!-- Normal upload UI -->
             <template v-if="!showClearConfirm">
               <!-- Input Mode Tabs -->
               <div class="input-tabs">
@@ -567,6 +684,22 @@ function useSample() {
                 </button>
               </div>
               
+              <!-- Step-by-step info -->
+              <div class="step-info">
+                <div class="step-info__icon">
+                  <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <circle cx="12" cy="12" r="10"></circle>
+                    <line x1="12" y1="16" x2="12" y2="12"></line>
+                    <line x1="12" y1="8" x2="12.01" y2="8"></line>
+                  </svg>
+                </div>
+                <div class="step-info__text">
+                  각 단계별로 생성된 결과를 검토하고 피드백을 제공할 수 있습니다.
+                  <br>
+                  <span class="step-info__steps">User Story → BC → 매핑 → Aggregate → Command → Event → Policy</span>
+                </div>
+              </div>
+              
               <!-- Error Display -->
               <div v-if="error" class="error-message">
                 <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -579,7 +712,7 @@ function useSample() {
             </template>
           </div>
           
-          <!-- Footer (hidden during confirm) -->
+          <!-- Footer -->
           <div v-if="!showClearConfirm" class="modal-footer">
             <button class="btn btn--secondary" @click="closeModal">
               취소
@@ -606,15 +739,31 @@ function useSample() {
     </Transition>
   </Teleport>
   
-  <!-- Floating Progress Panel (Bottom-Right, Non-blocking) -->
+  <!-- Floating Progress/Review Panel (Bottom-Right, Non-blocking) -->
   <Teleport to="body">
     <Transition name="slide-up">
-      <div v-if="showFloatingPanel" class="floating-panel" :class="{ 'is-minimized': isPanelMinimized }">
+      <div 
+        v-if="showFloatingPanel" 
+        class="floating-panel" 
+        :class="{ 
+          'is-minimized': isPanelMinimized,
+          'is-review': waitingForReview,
+          'is-complete': summary
+        }"
+      >
         <!-- Panel Header -->
         <div class="floating-panel__header" @click="toggleMinimize">
           <div class="floating-panel__title">
-            <div class="floating-panel__status" :class="{ 'is-complete': summary, 'is-error': error }">
+            <div class="floating-panel__status" :class="{ 
+              'is-complete': summary, 
+              'is-error': error,
+              'is-review': waitingForReview
+            }">
               <span v-if="isProcessing && !error" class="status-spinner"></span>
+              <svg v-else-if="waitingForReview" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"></path>
+                <circle cx="12" cy="12" r="3"></circle>
+              </svg>
               <svg v-else-if="summary" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                 <polyline points="20 6 9 17 4 12"></polyline>
               </svg>
@@ -625,9 +774,9 @@ function useSample() {
               </svg>
             </div>
             <span class="floating-panel__label">
-              {{ summary ? '생성 완료' : error ? '오류 발생' : phaseLabel }}
+              {{ summary ? '생성 완료' : error ? '오류 발생' : waitingForReview ? `${currentStepLabel} 검토` : currentStepLabel }}
             </span>
-            <span v-if="!summary && !error" class="floating-panel__percent">{{ progress }}%</span>
+            <span v-if="!summary && !error && !waitingForReview" class="floating-panel__percent">{{ progress }}%</span>
           </div>
           <div class="floating-panel__actions">
             <button class="panel-btn" @click.stop="toggleMinimize" :title="isPanelMinimized ? '펼치기' : '접기'">
@@ -645,18 +794,41 @@ function useSample() {
           </div>
         </div>
         
-        <!-- Progress Bar (always visible in header area) -->
-        <div v-if="isProcessing && !isPanelMinimized" class="floating-panel__progress">
+        <!-- Progress Bar -->
+        <div v-if="!isPanelMinimized && isProcessing" class="floating-panel__progress">
           <div class="mini-progress-bar">
             <div class="mini-progress-fill" :style="{ width: `${progress}%` }"></div>
           </div>
           <p class="floating-panel__message">{{ currentMessage }}</p>
         </div>
         
-        <!-- Panel Body (collapsible) -->
+        <!-- Panel Body -->
         <div v-if="!isPanelMinimized" class="floating-panel__body">
-          <!-- Live Created Items -->
-          <div v-if="isProcessing" class="mini-items">
+          <!-- Error Banner (shown in any mode) -->
+          <div v-if="error && (waitingForReview || isProcessing)" class="inline-error">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <circle cx="12" cy="12" r="10"></circle>
+              <line x1="12" y1="8" x2="12" y2="12"></line>
+              <line x1="12" y1="16" x2="12.01" y2="16"></line>
+            </svg>
+            <span>{{ error }}</span>
+            <button class="error-dismiss" @click="error = null">×</button>
+          </div>
+          
+          <!-- Review Mode -->
+          <StepReviewPanel
+            v-if="waitingForReview"
+            :step="currentStep"
+            :step-label="currentStepLabel"
+            :items="reviewItems"
+            :message="currentMessage"
+            :is-loading="isProcessing"
+            @approve="handleApprove"
+            @regenerate="handleRegenerate"
+          />
+          
+          <!-- Processing Mode -->
+          <div v-else-if="isProcessing" class="mini-items">
             <TransitionGroup name="item-list">
               <div 
                 v-for="item in createdItems.slice(-5)"
@@ -675,7 +847,7 @@ function useSample() {
           </div>
           
           <!-- Summary View -->
-          <div v-if="summary" class="mini-summary">
+          <div v-else-if="summary" class="mini-summary">
             <div class="mini-summary__stats">
               <div class="mini-stat">
                 <span class="mini-stat__icon stat-icon--userstory">US</span>
@@ -706,7 +878,7 @@ function useSample() {
           </div>
           
           <!-- Error -->
-          <div v-if="error && !isProcessing" class="mini-error">
+          <div v-else-if="error && !isProcessing" class="mini-error">
             {{ error }}
           </div>
         </div>
@@ -792,6 +964,34 @@ function useSample() {
   gap: var(--spacing-sm);
   padding: var(--spacing-md) var(--spacing-lg);
   border-top: 1px solid var(--color-border);
+}
+
+/* Step Info Box */
+.step-info {
+  display: flex;
+  gap: var(--spacing-sm);
+  padding: var(--spacing-md);
+  background: rgba(34, 139, 230, 0.1);
+  border: 1px solid rgba(34, 139, 230, 0.3);
+  border-radius: var(--radius-md);
+  margin-top: var(--spacing-md);
+}
+
+.step-info__icon {
+  color: var(--color-accent);
+  flex-shrink: 0;
+}
+
+.step-info__text {
+  font-size: 0.85rem;
+  color: var(--color-text);
+  line-height: 1.5;
+}
+
+.step-info__steps {
+  font-size: 0.75rem;
+  color: var(--color-text-light);
+  font-family: var(--font-mono);
 }
 
 /* Existing Data Warning */
@@ -1112,24 +1312,35 @@ function useSample() {
 }
 
 /* ============================================
-   Floating Panel Styles (Bottom-Right)
+   Floating Panel Styles
    ============================================ */
 .floating-panel {
   position: fixed;
   bottom: var(--spacing-lg);
   right: var(--spacing-lg);
-  width: 320px;
+  width: 400px;
+  max-height: 70vh;
   background: var(--color-bg-secondary);
   border: 1px solid var(--color-border);
   border-radius: var(--radius-lg);
   box-shadow: var(--shadow-lg);
   z-index: 900;
   overflow: hidden;
+  display: flex;
+  flex-direction: column;
   transition: width 0.2s ease, height 0.2s ease;
 }
 
 .floating-panel.is-minimized {
-  width: 240px;
+  width: 280px;
+}
+
+.floating-panel.is-review {
+  border-color: #ffc107;
+}
+
+.floating-panel.is-complete {
+  border-color: #40c057;
 }
 
 .floating-panel__header {
@@ -1140,6 +1351,7 @@ function useSample() {
   background: var(--color-bg-tertiary);
   cursor: pointer;
   user-select: none;
+  flex-shrink: 0;
 }
 
 .floating-panel__title {
@@ -1149,8 +1361,8 @@ function useSample() {
 }
 
 .floating-panel__status {
-  width: 20px;
-  height: 20px;
+  width: 24px;
+  height: 24px;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -1167,9 +1379,14 @@ function useSample() {
   background: #ff6464;
 }
 
+.floating-panel__status.is-review {
+  background: #ffc107;
+  color: #1a1a1a;
+}
+
 .status-spinner {
-  width: 12px;
-  height: 12px;
+  width: 14px;
+  height: 14px;
   border: 2px solid rgba(255, 255, 255, 0.3);
   border-top-color: white;
   border-radius: 50%;
@@ -1177,7 +1394,7 @@ function useSample() {
 }
 
 .floating-panel__label {
-  font-size: 0.875rem;
+  font-size: 0.9rem;
   font-weight: 500;
   color: var(--color-text-bright);
 }
@@ -1194,8 +1411,8 @@ function useSample() {
 }
 
 .panel-btn {
-  width: 24px;
-  height: 24px;
+  width: 28px;
+  height: 28px;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -1215,6 +1432,7 @@ function useSample() {
 .floating-panel__progress {
   padding: var(--spacing-sm) var(--spacing-md);
   border-bottom: 1px solid var(--color-border);
+  flex-shrink: 0;
 }
 
 .mini-progress-bar {
@@ -1241,9 +1459,9 @@ function useSample() {
 }
 
 .floating-panel__body {
-  padding: var(--spacing-sm) var(--spacing-md);
-  max-height: 200px;
+  flex: 1;
   overflow-y: auto;
+  min-height: 0;
 }
 
 /* Mini Items List */
@@ -1251,6 +1469,7 @@ function useSample() {
   display: flex;
   flex-direction: column;
   gap: 4px;
+  padding: var(--spacing-sm) var(--spacing-md);
 }
 
 .mini-item {
@@ -1275,19 +1494,19 @@ function useSample() {
 }
 
 .item-icon {
-  width: 18px;
-  height: 18px;
+  width: 20px;
+  height: 20px;
   border-radius: 3px;
   display: flex;
   align-items: center;
   justify-content: center;
-  font-size: 0.6rem;
+  font-size: 0.65rem;
   font-weight: 600;
   color: white;
   flex-shrink: 0;
 }
 
-.item-icon--userstory { background: #20c997; font-size: 0.5rem; }
+.item-icon--userstory { background: #20c997; }
 .item-icon--boundedcontext { background: var(--color-bc); border: 1.5px solid var(--color-text-light); color: var(--color-text-light); }
 .item-icon--aggregate { background: var(--color-aggregate); color: var(--color-bc); }
 .item-icon--command { background: var(--color-command); }
@@ -1310,6 +1529,10 @@ function useSample() {
 }
 
 /* Mini Summary */
+.mini-summary {
+  padding: var(--spacing-md);
+}
+
 .mini-summary__stats {
   display: grid;
   grid-template-columns: repeat(6, 1fr);
@@ -1328,18 +1551,18 @@ function useSample() {
 }
 
 .mini-stat__icon {
-  width: 22px;
-  height: 22px;
+  width: 24px;
+  height: 24px;
   border-radius: 4px;
   display: flex;
   align-items: center;
   justify-content: center;
-  font-size: 0.6rem;
+  font-size: 0.65rem;
   font-weight: 600;
   color: white;
 }
 
-.stat-icon--userstory { background: #20c997; font-size: 0.55rem; }
+.stat-icon--userstory { background: #20c997; }
 .stat-icon--bc { background: var(--color-bc); border: 1.5px solid var(--color-text-light); color: var(--color-text-light); }
 .stat-icon--aggregate { background: var(--color-aggregate); color: var(--color-bc); }
 .stat-icon--command { background: var(--color-command); }
@@ -1347,23 +1570,63 @@ function useSample() {
 .stat-icon--policy { background: var(--color-policy); }
 
 .mini-stat__value {
-  font-size: 0.9rem;
+  font-size: 1rem;
   font-weight: 600;
   color: var(--color-text-bright);
 }
 
 .mini-summary__hint {
-  font-size: 0.7rem;
+  font-size: 0.75rem;
   color: var(--color-text-light);
   text-align: center;
 }
 
 .mini-error {
-  padding: var(--spacing-sm);
+  padding: var(--spacing-md);
   background: rgba(255, 100, 100, 0.1);
   border-radius: var(--radius-sm);
   color: #ff6464;
-  font-size: 0.75rem;
+  font-size: 0.8rem;
+  margin: var(--spacing-md);
+}
+
+/* Inline Error Banner */
+.inline-error {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-sm);
+  padding: var(--spacing-sm) var(--spacing-md);
+  background: rgba(255, 100, 100, 0.15);
+  border-bottom: 1px solid rgba(255, 100, 100, 0.3);
+  color: #ff6464;
+  font-size: 0.8rem;
+}
+
+.inline-error svg {
+  flex-shrink: 0;
+}
+
+.inline-error span {
+  flex: 1;
+}
+
+.error-dismiss {
+  width: 20px;
+  height: 20px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  border: none;
+  border-radius: var(--radius-sm);
+  color: #ff6464;
+  font-size: 1rem;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.error-dismiss:hover {
+  background: rgba(255, 100, 100, 0.2);
 }
 
 /* Transitions */

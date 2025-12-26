@@ -1,5 +1,5 @@
 <script setup>
-import { onMounted, ref, watch } from 'vue'
+import { onMounted, ref, watch, inject } from 'vue'
 import { useNavigatorStore } from '../stores/navigator'
 import { useTerminologyStore } from '../stores/terminology'
 import TreeNode from './TreeNode.vue'
@@ -7,6 +7,9 @@ import TreeNode from './TreeNode.vue'
 const navigatorStore = useNavigatorStore()
 const terminologyStore = useTerminologyStore()
 const isLoading = ref(true)
+
+// Inject addUserStory function from App.vue
+const addUserStory = inject('addUserStory', () => {})
 
 onMounted(async () => {
   await loadData()
@@ -99,6 +102,17 @@ watch(() => navigatorStore.loading, (newVal) => {
       </div>
       
       <template v-else>
+        <!-- Add User Story Button -->
+        <div class="add-story-section">
+          <button class="add-story-btn" @click="addUserStory()" title="Add new User Story">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <line x1="12" y1="5" x2="12" y2="19"></line>
+              <line x1="5" y1="12" x2="19" y2="12"></line>
+            </svg>
+            <span>Add User Story</span>
+          </button>
+        </div>
+        
         <!-- Unassigned User Stories (root level) -->
         <div v-if="navigatorStore.userStories.length > 0" class="section-group">
           <div class="section-header">
@@ -185,6 +199,43 @@ watch(() => navigatorStore.loading, (newVal) => {
 .tree-action-btn:disabled {
   opacity: 0.5;
   cursor: not-allowed;
+}
+
+/* Add Story Section */
+.add-story-section {
+  padding: var(--spacing-sm);
+  margin-bottom: var(--spacing-sm);
+}
+
+.add-story-btn {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--spacing-xs);
+  padding: var(--spacing-sm) var(--spacing-md);
+  background: linear-gradient(135deg, rgba(32, 201, 151, 0.15), rgba(32, 201, 151, 0.05));
+  border: 1px dashed rgba(32, 201, 151, 0.5);
+  border-radius: var(--radius-md);
+  color: #20c997;
+  font-size: 0.8rem;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.add-story-btn:hover {
+  background: linear-gradient(135deg, rgba(32, 201, 151, 0.25), rgba(32, 201, 151, 0.1));
+  border-color: #20c997;
+  transform: translateY(-1px);
+}
+
+.add-story-btn:active {
+  transform: translateY(0);
+}
+
+.add-story-btn svg {
+  flex-shrink: 0;
 }
 
 /* Section Groups */

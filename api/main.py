@@ -62,6 +62,10 @@ app.include_router(ingestion_router)
 from api.change import router as change_router
 app.include_router(change_router)
 
+# Include user story management router
+from api.user_story import router as user_story_router
+app.include_router(user_story_router)
+
 
 def get_session():
     """Get a Neo4j session."""

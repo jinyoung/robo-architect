@@ -1,10 +1,11 @@
 """
-Ingestion API - Document Upload and Real-time Processing
+Ingestion API - Document Upload and Step-by-Step Processing with User Review
 
 Provides:
 - File upload endpoint (text, PDF)
 - SSE streaming for real-time progress updates
-- Integration with Event Storming workflow
+- Step-by-step workflow with user review at each phase
+- Feedback-based regeneration support
 """
 
 from __future__ import annotations
@@ -29,57 +30,117 @@ router = APIRouter(prefix="/api/ingest", tags=["ingestion"])
 
 
 # =============================================================================
-# Models
+# Workflow Steps
 # =============================================================================
 
 
-class IngestionPhase(str, Enum):
+class WorkflowStep(str, Enum):
+    """Workflow steps that require user review."""
     UPLOAD = "upload"
     PARSING = "parsing"
-    EXTRACTING_USER_STORIES = "extracting_user_stories"
-    IDENTIFYING_BC = "identifying_bc"
-    EXTRACTING_AGGREGATES = "extracting_aggregates"
-    EXTRACTING_COMMANDS = "extracting_commands"
-    EXTRACTING_EVENTS = "extracting_events"
-    IDENTIFYING_POLICIES = "identifying_policies"
-    SAVING = "saving"
+    USER_STORIES = "user_stories"
+    BOUNDED_CONTEXTS = "bounded_contexts"
+    USER_STORY_MAPPING = "user_story_mapping"
+    AGGREGATES = "aggregates"
+    COMMANDS = "commands"
+    EVENTS = "events"
+    POLICIES = "policies"
     COMPLETE = "complete"
     ERROR = "error"
 
 
-class ProgressEvent(BaseModel):
-    """Progress event sent via SSE."""
-    phase: IngestionPhase
-    message: str
-    progress: int  # 0-100
-    data: Optional[dict] = None  # Created objects
+# Steps that require user review
+REVIEW_STEPS = [
+    WorkflowStep.USER_STORIES,
+    WorkflowStep.BOUNDED_CONTEXTS,
+    WorkflowStep.USER_STORY_MAPPING,
+    WorkflowStep.AGGREGATES,
+    WorkflowStep.COMMANDS,
+    WorkflowStep.EVENTS,
+    WorkflowStep.POLICIES,
+]
 
-
-class CreatedObject(BaseModel):
-    """Information about a created DDD object."""
-    id: str
-    name: str
-    type: str  # BoundedContext, Aggregate, Command, Event, Policy
-    parent_id: Optional[str] = None
-    description: Optional[str] = None
+STEP_LABELS = {
+    WorkflowStep.USER_STORIES: "User Story 추출",
+    WorkflowStep.BOUNDED_CONTEXTS: "Bounded Context 식별",
+    WorkflowStep.USER_STORY_MAPPING: "User Story - BC 매핑",
+    WorkflowStep.AGGREGATES: "Aggregate 추출",
+    WorkflowStep.COMMANDS: "Command 추출",
+    WorkflowStep.EVENTS: "Event 추출",
+    WorkflowStep.POLICIES: "Policy 식별",
+}
 
 
 # =============================================================================
-# Session Storage (In-memory for demo)
+# Models
+# =============================================================================
+
+
+class StepEvent(BaseModel):
+    """Event sent via SSE for each step."""
+    step: WorkflowStep
+    status: str  # 'processing', 'review_required', 'completed', 'error'
+    message: str
+    progress: int  # 0-100
+    data: Optional[dict] = None
+    items: Optional[list] = None  # Generated items for review
+    waitForReview: bool = False
+
+
+class ReviewAction(BaseModel):
+    """User's review action."""
+    action: str  # 'approve' or 'regenerate'
+    feedback: Optional[str] = None  # Natural language feedback for regeneration
+
+
+class GeneratedUserStory(BaseModel):
+    """Generated User Story from requirements."""
+    id: str
+    role: str
+    action: str
+    benefit: str
+    priority: str = "medium"
+
+
+class UserStoryList(BaseModel):
+    """List of generated user stories."""
+    user_stories: list[GeneratedUserStory]
+
+
+# =============================================================================
+# Session Storage
 # =============================================================================
 
 
 @dataclass
 class IngestionSession:
-    """Tracks state of an ingestion session."""
+    """Tracks state of an ingestion session with step-by-step workflow."""
     id: str
-    status: IngestionPhase = IngestionPhase.UPLOAD
-    progress: int = 0
+    current_step: WorkflowStep = WorkflowStep.UPLOAD
+    status: str = "idle"  # 'idle', 'processing', 'waiting_review', 'completed', 'error'
     message: str = ""
-    events: list[dict] = field(default_factory=list)
-    created_objects: list[CreatedObject] = field(default_factory=list)
-    error: Optional[str] = None
     content: str = ""
+    
+    # Accumulated data from each step
+    user_stories: list = field(default_factory=list)
+    bounded_contexts: list = field(default_factory=list)
+    user_story_mappings: dict = field(default_factory=dict)  # {bc_id: [us_ids]}
+    aggregates: dict = field(default_factory=dict)  # {bc_id: [aggregates]}
+    commands: dict = field(default_factory=dict)  # {agg_id: [commands]}
+    events: dict = field(default_factory=dict)  # {agg_id: [events]}
+    policies: list = field(default_factory=list)
+    
+    # Review state
+    pending_review_data: Optional[dict] = None
+    feedback_history: list = field(default_factory=list)
+    
+    # Event queue for SSE
+    event_queue: asyncio.Queue = field(default_factory=asyncio.Queue)
+    
+    # Control flags
+    waiting_for_review: bool = False
+    should_continue: bool = False
+    regenerate_with_feedback: Optional[str] = None
 
 
 # Active sessions
@@ -95,14 +156,6 @@ def create_session() -> IngestionSession:
     session = IngestionSession(id=session_id)
     _sessions[session_id] = session
     return session
-
-
-def add_event(session: IngestionSession, event: ProgressEvent):
-    """Add event to session and update status."""
-    session.events.append(event.model_dump())
-    session.status = event.phase
-    session.progress = event.progress
-    session.message = event.message
 
 
 # =============================================================================
@@ -134,7 +187,7 @@ def extract_text_from_pdf(file_content: bytes) -> str:
 
 
 # =============================================================================
-# LLM Integration for User Story Extraction
+# LLM Integration
 # =============================================================================
 
 
@@ -151,9 +204,18 @@ def get_llm():
         return ChatOpenAI(model=model, temperature=0)
 
 
-EXTRACT_USER_STORIES_PROMPT = """분석할 요구사항 문서:
+# =============================================================================
+# Step Processors
+# =============================================================================
 
-{requirements}
+
+def extract_user_stories(content: str, feedback: Optional[str] = None) -> list[GeneratedUserStory]:
+    """Extract user stories from requirements text."""
+    from langchain_core.messages import HumanMessage, SystemMessage
+    
+    prompt = f"""분석할 요구사항 문서:
+
+{content[:8000]}
 
 ---
 
@@ -168,36 +230,20 @@ EXTRACT_USER_STORIES_PROMPT = """분석할 요구사항 문서:
 6. 우선순위는 핵심 기능은 high, 부가 기능은 medium, 선택 기능은 low
 
 User Story ID는 US-001, US-002 형식으로 순차적으로 부여하세요.
-모든 주요 기능을 빠짐없이 User Story로 추출하세요.
-"""
+모든 주요 기능을 빠짐없이 User Story로 추출하세요."""
 
+    if feedback:
+        prompt += f"""
 
-class GeneratedUserStory(BaseModel):
-    """Generated User Story from requirements."""
-    id: str
-    role: str
-    action: str
-    benefit: str
-    priority: str = "medium"
+사용자 피드백 (반드시 반영하세요):
+{feedback}"""
 
-
-class UserStoryList(BaseModel):
-    """List of generated user stories."""
-    user_stories: list[GeneratedUserStory]
-
-
-def extract_user_stories_from_text(text: str) -> list[GeneratedUserStory]:
-    """Extract user stories from text using LLM."""
-    from langchain_core.messages import HumanMessage, SystemMessage
-    
     llm = get_llm()
     structured_llm = llm.with_structured_output(UserStoryList)
     
     system_prompt = """당신은 도메인 주도 설계(DDD) 전문가입니다. 
 요구사항을 User Story로 변환하는 작업을 수행합니다.
 User Story는 명확하고 테스트 가능해야 합니다."""
-    
-    prompt = EXTRACT_USER_STORIES_PROMPT.format(requirements=text[:8000])  # Limit context
     
     response = structured_llm.invoke([
         SystemMessage(content=system_prompt),
@@ -207,44 +253,294 @@ User Story는 명확하고 테스트 가능해야 합니다."""
     return response.user_stories
 
 
-# =============================================================================
-# Workflow Runner with Streaming
-# =============================================================================
-
-
-async def run_ingestion_workflow(
-    session: IngestionSession,
-    content: str
-) -> AsyncGenerator[ProgressEvent, None]:
-    """
-    Run the full ingestion workflow with streaming progress updates.
+def identify_bounded_contexts(user_stories: list, feedback: Optional[str] = None):
+    """Identify bounded contexts from user stories."""
+    from langchain_core.messages import HumanMessage, SystemMessage
+    from agent.nodes import BoundedContextList
+    from agent.prompts import SYSTEM_PROMPT
     
-    Yields ProgressEvent objects at each significant step.
+    stories_text = "\n".join([
+        f"[{us.id if hasattr(us, 'id') else us['id']}] As a {us.role if hasattr(us, 'role') else us['role']}, "
+        f"I want to {us.action if hasattr(us, 'action') else us['action']}, "
+        f"so that {us.benefit if hasattr(us, 'benefit') else us['benefit']}"
+        for us in user_stories
+    ])
+    
+    prompt = f"""다음 User Story들을 분석하여 적절한 Bounded Context들을 식별하세요.
+
+User Stories:
+{stories_text}
+
+---
+
+지침:
+1. 관련 도메인 개념들을 그룹화하여 Bounded Context 식별
+2. 각 BC는 명확한 책임과 경계를 가져야 함
+3. BC 이름은 영어로, 명확하고 간결하게
+4. 각 BC에 어떤 User Story들이 속하는지 user_story_ids에 포함
+5. BC ID는 BC-영문약어 형식 (예: BC-ORD, BC-PAY)
+
+모든 User Story가 최소 하나의 BC에 할당되어야 합니다."""
+
+    if feedback:
+        prompt += f"""
+
+사용자 피드백 (반드시 반영하세요):
+{feedback}"""
+
+    llm = get_llm()
+    structured_llm = llm.with_structured_output(BoundedContextList)
+    
+    response = structured_llm.invoke([
+        SystemMessage(content=SYSTEM_PROMPT),
+        HumanMessage(content=prompt)
+    ])
+    
+    return response.bounded_contexts
+
+
+def extract_aggregates_for_bc(bc, user_stories: list, feedback: Optional[str] = None):
+    """Extract aggregates for a specific bounded context."""
+    from langchain_core.messages import HumanMessage, SystemMessage
+    from agent.nodes import AggregateList
+    from agent.prompts import SYSTEM_PROMPT, EXTRACT_AGGREGATES_PROMPT
+    
+    bc_id_short = bc.id.replace("BC-", "")
+    
+    # Get user stories for this BC
+    bc_stories = [us for us in user_stories 
+                  if (us.id if hasattr(us, 'id') else us['id']) in bc.user_story_ids]
+    
+    breakdowns_text = "\n".join([
+        f"- [{us.id if hasattr(us, 'id') else us['id']}] {us.action if hasattr(us, 'action') else us['action']}"
+        for us in bc_stories
+    ])
+    
+    prompt = EXTRACT_AGGREGATES_PROMPT.format(
+        bc_name=bc.name,
+        bc_id=bc.id,
+        bc_id_short=bc_id_short,
+        bc_description=bc.description,
+        breakdowns=breakdowns_text
+    )
+    
+    if feedback:
+        prompt += f"""
+
+사용자 피드백 (반드시 반영하세요):
+{feedback}"""
+
+    llm = get_llm()
+    structured_llm = llm.with_structured_output(AggregateList)
+    
+    response = structured_llm.invoke([
+        SystemMessage(content=SYSTEM_PROMPT),
+        HumanMessage(content=prompt)
+    ])
+    
+    return response.aggregates
+
+
+def extract_commands_for_aggregate(agg, bc, user_stories: list, feedback: Optional[str] = None):
+    """Extract commands for a specific aggregate."""
+    from langchain_core.messages import HumanMessage, SystemMessage
+    from agent.nodes import CommandList
+    from agent.prompts import SYSTEM_PROMPT, EXTRACT_COMMANDS_PROMPT
+    
+    bc_id_short = bc.id.replace("BC-", "")
+    
+    # Get user stories for this BC
+    bc_stories = [us for us in user_stories 
+                  if (us.id if hasattr(us, 'id') else us['id']) in bc.user_story_ids]
+    
+    stories_context = "\n".join([
+        f"[{us.id if hasattr(us, 'id') else us['id']}] As a {us.role if hasattr(us, 'role') else us['role']}, "
+        f"I want to {us.action if hasattr(us, 'action') else us['action']}"
+        for us in bc_stories
+    ])
+    
+    prompt = EXTRACT_COMMANDS_PROMPT.format(
+        aggregate_name=agg.name,
+        aggregate_id=agg.id,
+        bc_name=bc.name,
+        bc_short=bc_id_short,
+        user_story_context=stories_context[:2000]
+    )
+    
+    if feedback:
+        prompt += f"""
+
+사용자 피드백 (반드시 반영하세요):
+{feedback}"""
+
+    llm = get_llm()
+    structured_llm = llm.with_structured_output(CommandList)
+    
+    try:
+        response = structured_llm.invoke([
+            SystemMessage(content=SYSTEM_PROMPT),
+            HumanMessage(content=prompt)
+        ])
+        return response.commands
+    except Exception:
+        return []
+
+
+def extract_events_for_aggregate(agg, bc, commands: list, feedback: Optional[str] = None):
+    """Extract events for a specific aggregate."""
+    from langchain_core.messages import HumanMessage, SystemMessage
+    from agent.nodes import EventList
+    from agent.prompts import SYSTEM_PROMPT, EXTRACT_EVENTS_PROMPT
+    
+    if not commands:
+        return []
+    
+    bc_id_short = bc.id.replace("BC-", "")
+    
+    commands_text = "\n".join([
+        f"- {cmd.name}: {cmd.description}" if hasattr(cmd, 'description') and cmd.description else f"- {cmd.name}"
+        for cmd in commands
+    ])
+    
+    prompt = EXTRACT_EVENTS_PROMPT.format(
+        aggregate_name=agg.name,
+        bc_name=bc.name,
+        bc_short=bc_id_short,
+        commands=commands_text
+    )
+    
+    if feedback:
+        prompt += f"""
+
+사용자 피드백 (반드시 반영하세요):
+{feedback}"""
+
+    llm = get_llm()
+    structured_llm = llm.with_structured_output(EventList)
+    
+    try:
+        response = structured_llm.invoke([
+            SystemMessage(content=SYSTEM_PROMPT),
+            HumanMessage(content=prompt)
+        ])
+        return response.events
+    except Exception:
+        return []
+
+
+def identify_policies(bounded_contexts, aggregates, commands, events, feedback: Optional[str] = None):
+    """Identify policies across bounded contexts."""
+    from langchain_core.messages import HumanMessage, SystemMessage
+    from agent.nodes import PolicyList
+    from agent.prompts import SYSTEM_PROMPT, IDENTIFY_POLICIES_PROMPT
+    
+    # Collect all events
+    all_events_list = []
+    for agg_id, evts in events.items():
+        for evt in evts:
+            all_events_list.append(f"- {evt.name}")
+    
+    events_text = "\n".join(all_events_list)
+    
+    # Collect commands by BC
+    commands_by_bc = {}
+    for bc in bounded_contexts:
+        bc_cmds = []
+        for agg in aggregates.get(bc.id, []):
+            for cmd in commands.get(agg.id, []):
+                bc_cmds.append(f"- {cmd.name}")
+        commands_by_bc[bc.name] = "\n".join(bc_cmds) if bc_cmds else "No commands"
+    
+    commands_text = "\n".join([
+        f"{bc_name}:\n{cmds}" for bc_name, cmds in commands_by_bc.items()
+    ])
+    
+    bc_text = "\n".join([
+        f"- {bc.name}: {bc.description}" for bc in bounded_contexts
+    ])
+    
+    prompt = IDENTIFY_POLICIES_PROMPT.format(
+        events=events_text,
+        commands_by_bc=commands_text,
+        bounded_contexts=bc_text
+    )
+    
+    if feedback:
+        prompt += f"""
+
+사용자 피드백 (반드시 반영하세요):
+{feedback}"""
+
+    llm = get_llm()
+    structured_llm = llm.with_structured_output(PolicyList)
+    
+    try:
+        response = structured_llm.invoke([
+            SystemMessage(content=SYSTEM_PROMPT),
+            HumanMessage(content=prompt)
+        ])
+        return response.policies
+    except Exception:
+        return []
+
+
+# =============================================================================
+# Workflow Runner
+# =============================================================================
+
+
+async def run_step_workflow(session: IngestionSession) -> AsyncGenerator[StepEvent, None]:
+    """
+    Run the step-by-step workflow with review checkpoints.
+    Yields StepEvent objects and pauses at each review step.
     """
     from agent.neo4j_client import get_neo4j_client
     
     client = get_neo4j_client()
     
     try:
-        # Phase 1: Parsing
-        yield ProgressEvent(
-            phase=IngestionPhase.PARSING,
-            message="문서 파싱 중...",
-            progress=5
-        )
-        await asyncio.sleep(0.3)  # Small delay for UI feedback
+        # ===================
+        # STEP 1: User Stories
+        # ===================
+        session.current_step = WorkflowStep.USER_STORIES
         
-        # Phase 2: Extract User Stories
-        yield ProgressEvent(
-            phase=IngestionPhase.EXTRACTING_USER_STORIES,
+        yield StepEvent(
+            step=WorkflowStep.USER_STORIES,
+            status="processing",
             message="User Story 추출 중...",
             progress=10
         )
         
-        user_stories = extract_user_stories_from_text(content)
+        feedback = session.regenerate_with_feedback
+        session.regenerate_with_feedback = None
         
-        # Save user stories to Neo4j and emit events for each
+        user_stories = extract_user_stories(session.content, feedback)
+        session.user_stories = user_stories
+        
+        # Emit each user story for UI
         for i, us in enumerate(user_stories):
+            yield StepEvent(
+                step=WorkflowStep.USER_STORIES,
+                status="processing",
+                message=f"User Story 생성: {us.id}",
+                progress=10 + (5 * (i + 1) // len(user_stories)),
+                data={
+                    "type": "UserStory",
+                    "object": {
+                        "id": us.id,
+                        "name": f"{us.role}: {us.action[:30]}...",
+                        "type": "UserStory",
+                        "role": us.role,
+                        "action": us.action,
+                        "benefit": us.benefit,
+                        "priority": us.priority
+                    }
+                }
+            )
+            await asyncio.sleep(0.1)
+        
+        # Save to Neo4j
+        for us in user_stories:
             try:
                 client.create_user_story(
                     id=us.id,
@@ -254,81 +550,67 @@ async def run_ingestion_workflow(
                     priority=us.priority,
                     status="draft"
                 )
-                
-                # Emit event for each User Story created
-                yield ProgressEvent(
-                    phase=IngestionPhase.EXTRACTING_USER_STORIES,
-                    message=f"User Story 생성: {us.id}",
-                    progress=10 + (10 * (i + 1) // len(user_stories)),
-                    data={
-                        "type": "UserStory",
-                        "object": {
-                            "id": us.id,
-                            "name": f"{us.role}: {us.action[:30]}...",
-                            "type": "UserStory",
-                            "role": us.role,
-                            "action": us.action,
-                            "benefit": us.benefit,
-                            "priority": us.priority
-                        }
-                    }
-                )
-                await asyncio.sleep(0.15)  # Small delay for visual effect
-                
             except Exception:
-                pass  # Skip if already exists
+                pass
         
-        yield ProgressEvent(
-            phase=IngestionPhase.EXTRACTING_USER_STORIES,
-            message=f"{len(user_stories)}개 User Story 추출 완료",
-            progress=20,
-            data={
-                "count": len(user_stories),
-                "items": [{"id": us.id, "role": us.role, "action": us.action[:50]} for us in user_stories]
-            }
+        # Request review
+        yield StepEvent(
+            step=WorkflowStep.USER_STORIES,
+            status="review_required",
+            message=f"{len(user_stories)}개 User Story 추출 완료 - 검토해주세요",
+            progress=15,
+            items=[{
+                "id": us.id,
+                "role": us.role,
+                "action": us.action,
+                "benefit": us.benefit,
+                "priority": us.priority
+            } for us in user_stories],
+            waitForReview=True
         )
         
-        # Phase 3: Identify Bounded Contexts
-        yield ProgressEvent(
-            phase=IngestionPhase.IDENTIFYING_BC,
+        # Wait for user review
+        session.waiting_for_review = True
+        while session.waiting_for_review:
+            await asyncio.sleep(0.1)
+        
+        # Check if regeneration requested
+        if session.regenerate_with_feedback:
+            # Clear and restart this step
+            for us in session.user_stories:
+                try:
+                    client.delete_node(us.id)
+                except Exception:
+                    pass
+            async for event in run_step_workflow(session):
+                yield event
+            return
+        
+        # ===================
+        # STEP 2: Bounded Contexts
+        # ===================
+        session.current_step = WorkflowStep.BOUNDED_CONTEXTS
+        
+        yield StepEvent(
+            step=WorkflowStep.BOUNDED_CONTEXTS,
+            status="processing",
             message="Bounded Context 식별 중...",
-            progress=25
+            progress=20
         )
         
-        from agent.nodes import BoundedContextList
-        from langchain_core.messages import HumanMessage, SystemMessage
-        from agent.prompts import IDENTIFY_BC_FROM_STORIES_PROMPT, SYSTEM_PROMPT
+        feedback = session.regenerate_with_feedback
+        session.regenerate_with_feedback = None
         
-        llm = get_llm()
+        bounded_contexts = identify_bounded_contexts(session.user_stories, feedback)
+        session.bounded_contexts = bounded_contexts
         
-        stories_text = "\n".join([
-            f"[{us.id}] As a {us.role}, I want to {us.action}, so that {us.benefit}"
-            for us in user_stories
-        ])
-        
-        structured_llm = llm.with_structured_output(BoundedContextList)
-        prompt = IDENTIFY_BC_FROM_STORIES_PROMPT.format(user_stories=stories_text)
-        
-        bc_response = structured_llm.invoke([
-            SystemMessage(content=SYSTEM_PROMPT),
-            HumanMessage(content=prompt)
-        ])
-        
-        bc_candidates = bc_response.bounded_contexts
-        
-        # Create BCs in Neo4j
-        for bc_idx, bc in enumerate(bc_candidates):
-            client.create_bounded_context(
-                id=bc.id,
-                name=bc.name,
-                description=bc.description
-            )
-            
-            # Emit BC creation event
-            yield ProgressEvent(
-                phase=IngestionPhase.IDENTIFYING_BC,
-                message=f"Bounded Context 생성: {bc.name}",
-                progress=30 + (10 * bc_idx // max(len(bc_candidates), 1)),
+        # Emit each BC for UI
+        for i, bc in enumerate(bounded_contexts):
+            yield StepEvent(
+                step=WorkflowStep.BOUNDED_CONTEXTS,
+                status="processing",
+                message=f"BC 생성: {bc.name}",
+                progress=20 + (5 * (i + 1) // len(bounded_contexts)),
                 data={
                     "type": "BoundedContext",
                     "object": {
@@ -340,18 +622,77 @@ async def run_ingestion_workflow(
                     }
                 }
             )
-            await asyncio.sleep(0.2)
-            
-            # Link user stories to BC and emit move events
+            await asyncio.sleep(0.1)
+        
+        # Save to Neo4j
+        for bc in bounded_contexts:
+            try:
+                client.create_bounded_context(
+                    id=bc.id,
+                    name=bc.name,
+                    description=bc.description
+                )
+            except Exception:
+                pass
+        
+        # Request review
+        yield StepEvent(
+            step=WorkflowStep.BOUNDED_CONTEXTS,
+            status="review_required",
+            message=f"{len(bounded_contexts)}개 Bounded Context 식별 완료 - 검토해주세요",
+            progress=25,
+            items=[{
+                "id": bc.id,
+                "name": bc.name,
+                "description": bc.description,
+                "userStoryIds": bc.user_story_ids
+            } for bc in bounded_contexts],
+            waitForReview=True
+        )
+        
+        session.waiting_for_review = True
+        while session.waiting_for_review:
+            await asyncio.sleep(0.1)
+        
+        if session.regenerate_with_feedback:
+            for bc in session.bounded_contexts:
+                try:
+                    client.delete_node(bc.id)
+                except Exception:
+                    pass
+            session.current_step = WorkflowStep.BOUNDED_CONTEXTS
+            # Re-run from BC step
+            feedback = session.regenerate_with_feedback
+            session.regenerate_with_feedback = None
+            bounded_contexts = identify_bounded_contexts(session.user_stories, feedback)
+            session.bounded_contexts = bounded_contexts
+            # Continue below...
+        
+        # ===================
+        # STEP 3: User Story Mapping
+        # ===================
+        session.current_step = WorkflowStep.USER_STORY_MAPPING
+        
+        yield StepEvent(
+            step=WorkflowStep.USER_STORY_MAPPING,
+            status="processing",
+            message="User Story를 BC에 매핑 중...",
+            progress=30
+        )
+        
+        # Link user stories to BCs
+        mappings = []
+        for bc in session.bounded_contexts:
             for us_id in bc.user_story_ids:
                 try:
                     client.link_user_story_to_bc(us_id, bc.id)
+                    mappings.append({"usId": us_id, "bcId": bc.id, "bcName": bc.name})
                     
-                    # Emit event for User Story moving to BC
-                    yield ProgressEvent(
-                        phase=IngestionPhase.IDENTIFYING_BC,
-                        message=f"User Story {us_id} → {bc.name}",
-                        progress=30 + (10 * bc_idx // max(len(bc_candidates), 1)),
+                    yield StepEvent(
+                        step=WorkflowStep.USER_STORY_MAPPING,
+                        status="processing",
+                        message=f"{us_id} → {bc.name}",
+                        progress=35,
                         data={
                             "type": "UserStoryAssigned",
                             "object": {
@@ -362,60 +703,65 @@ async def run_ingestion_workflow(
                             }
                         }
                     )
-                    await asyncio.sleep(0.1)
+                    await asyncio.sleep(0.05)
                 except Exception:
                     pass
         
-        # Phase 4: Extract Aggregates
-        yield ProgressEvent(
-            phase=IngestionPhase.EXTRACTING_AGGREGATES,
+        session.user_story_mappings = {bc.id: bc.user_story_ids for bc in session.bounded_contexts}
+        
+        # Request review
+        yield StepEvent(
+            step=WorkflowStep.USER_STORY_MAPPING,
+            status="review_required",
+            message="User Story 매핑 완료 - 검토해주세요",
+            progress=40,
+            items=mappings,
+            waitForReview=True
+        )
+        
+        session.waiting_for_review = True
+        while session.waiting_for_review:
+            await asyncio.sleep(0.1)
+        
+        # ===================
+        # STEP 4: Aggregates
+        # ===================
+        session.current_step = WorkflowStep.AGGREGATES
+        
+        yield StepEvent(
+            step=WorkflowStep.AGGREGATES,
+            status="processing",
             message="Aggregate 추출 중...",
             progress=45
         )
         
-        from agent.nodes import AggregateList
-        from agent.prompts import EXTRACT_AGGREGATES_PROMPT
+        feedback = session.regenerate_with_feedback
+        session.regenerate_with_feedback = None
         
         all_aggregates = {}
-        progress_per_bc = 10 // max(len(bc_candidates), 1)
+        all_agg_items = []
         
-        for bc_idx, bc in enumerate(bc_candidates):
-            bc_id_short = bc.id.replace("BC-", "")
-            
-            # Create dummy breakdowns context
-            breakdowns_text = f"User Stories: {', '.join(bc.user_story_ids)}"
-            
-            prompt = EXTRACT_AGGREGATES_PROMPT.format(
-                bc_name=bc.name,
-                bc_id=bc.id,
-                bc_id_short=bc_id_short,
-                bc_description=bc.description,
-                breakdowns=breakdowns_text
-            )
-            
-            structured_llm = llm.with_structured_output(AggregateList)
-            
-            agg_response = structured_llm.invoke([
-                SystemMessage(content=SYSTEM_PROMPT),
-                HumanMessage(content=prompt)
-            ])
-            
-            aggregates = agg_response.aggregates
+        for bc in session.bounded_contexts:
+            aggregates = extract_aggregates_for_bc(bc, session.user_stories, feedback)
             all_aggregates[bc.id] = aggregates
             
             for agg in aggregates:
-                client.create_aggregate(
-                    id=agg.id,
-                    name=agg.name,
-                    bc_id=bc.id,
-                    root_entity=agg.root_entity,
-                    invariants=agg.invariants
-                )
+                try:
+                    client.create_aggregate(
+                        id=agg.id,
+                        name=agg.name,
+                        bc_id=bc.id,
+                        root_entity=agg.root_entity,
+                        invariants=agg.invariants
+                    )
+                except Exception:
+                    pass
                 
-                yield ProgressEvent(
-                    phase=IngestionPhase.EXTRACTING_AGGREGATES,
+                yield StepEvent(
+                    step=WorkflowStep.AGGREGATES,
+                    status="processing",
                     message=f"Aggregate 생성: {agg.name}",
-                    progress=45 + progress_per_bc * bc_idx,
+                    progress=50,
                     data={
                         "type": "Aggregate",
                         "object": {
@@ -426,61 +772,71 @@ async def run_ingestion_workflow(
                         }
                     }
                 )
-                await asyncio.sleep(0.15)
+                await asyncio.sleep(0.1)
+                
+                all_agg_items.append({
+                    "id": agg.id,
+                    "name": agg.name,
+                    "bcId": bc.id,
+                    "bcName": bc.name,
+                    "rootEntity": agg.root_entity
+                })
         
-        # Phase 5: Extract Commands
-        yield ProgressEvent(
-            phase=IngestionPhase.EXTRACTING_COMMANDS,
+        session.aggregates = all_aggregates
+        
+        # Request review
+        yield StepEvent(
+            step=WorkflowStep.AGGREGATES,
+            status="review_required",
+            message=f"{len(all_agg_items)}개 Aggregate 추출 완료 - 검토해주세요",
+            progress=55,
+            items=all_agg_items,
+            waitForReview=True
+        )
+        
+        session.waiting_for_review = True
+        while session.waiting_for_review:
+            await asyncio.sleep(0.1)
+        
+        # ===================
+        # STEP 5: Commands
+        # ===================
+        session.current_step = WorkflowStep.COMMANDS
+        
+        yield StepEvent(
+            step=WorkflowStep.COMMANDS,
+            status="processing",
             message="Command 추출 중...",
             progress=60
         )
         
-        from agent.nodes import CommandList
-        from agent.prompts import EXTRACT_COMMANDS_PROMPT
+        feedback = session.regenerate_with_feedback
+        session.regenerate_with_feedback = None
         
         all_commands = {}
+        all_cmd_items = []
         
-        for bc in bc_candidates:
-            bc_id_short = bc.id.replace("BC-", "")
-            bc_aggregates = all_aggregates.get(bc.id, [])
+        for bc in session.bounded_contexts:
+            bc_aggregates = session.aggregates.get(bc.id, [])
             
             for agg in bc_aggregates:
-                stories_context = "\n".join([
-                    f"[{us.id}] As a {us.role}, I want to {us.action}"
-                    for us in user_stories if us.id in bc.user_story_ids
-                ])
-                
-                prompt = EXTRACT_COMMANDS_PROMPT.format(
-                    aggregate_name=agg.name,
-                    aggregate_id=agg.id,
-                    bc_name=bc.name,
-                    bc_short=bc_id_short,
-                    user_story_context=stories_context[:2000]
-                )
-                
-                structured_llm = llm.with_structured_output(CommandList)
-                
-                try:
-                    cmd_response = structured_llm.invoke([
-                        SystemMessage(content=SYSTEM_PROMPT),
-                        HumanMessage(content=prompt)
-                    ])
-                    commands = cmd_response.commands
-                except Exception:
-                    commands = []
-                
+                commands = extract_commands_for_aggregate(agg, bc, session.user_stories, feedback)
                 all_commands[agg.id] = commands
                 
                 for cmd in commands:
-                    client.create_command(
-                        id=cmd.id,
-                        name=cmd.name,
-                        aggregate_id=agg.id,
-                        actor=cmd.actor
-                    )
+                    try:
+                        client.create_command(
+                            id=cmd.id,
+                            name=cmd.name,
+                            aggregate_id=agg.id,
+                            actor=cmd.actor
+                        )
+                    except Exception:
+                        pass
                     
-                    yield ProgressEvent(
-                        phase=IngestionPhase.EXTRACTING_COMMANDS,
+                    yield StepEvent(
+                        step=WorkflowStep.COMMANDS,
+                        status="processing",
                         message=f"Command 생성: {cmd.name}",
                         progress=65,
                         data={
@@ -493,66 +849,74 @@ async def run_ingestion_workflow(
                             }
                         }
                     )
-                    await asyncio.sleep(0.1)
+                    await asyncio.sleep(0.05)
+                    
+                    all_cmd_items.append({
+                        "id": cmd.id,
+                        "name": cmd.name,
+                        "aggregateId": agg.id,
+                        "aggregateName": agg.name,
+                        "actor": cmd.actor
+                    })
         
-        # Phase 6: Extract Events
-        yield ProgressEvent(
-            phase=IngestionPhase.EXTRACTING_EVENTS,
+        session.commands = all_commands
+        
+        # Request review
+        yield StepEvent(
+            step=WorkflowStep.COMMANDS,
+            status="review_required",
+            message=f"{len(all_cmd_items)}개 Command 추출 완료 - 검토해주세요",
+            progress=70,
+            items=all_cmd_items,
+            waitForReview=True
+        )
+        
+        session.waiting_for_review = True
+        while session.waiting_for_review:
+            await asyncio.sleep(0.1)
+        
+        # ===================
+        # STEP 6: Events
+        # ===================
+        session.current_step = WorkflowStep.EVENTS
+        
+        yield StepEvent(
+            step=WorkflowStep.EVENTS,
+            status="processing",
             message="Event 추출 중...",
             progress=75
         )
         
-        from agent.nodes import EventList
-        from agent.prompts import EXTRACT_EVENTS_PROMPT
+        feedback = session.regenerate_with_feedback
+        session.regenerate_with_feedback = None
         
         all_events = {}
+        all_evt_items = []
         
-        for bc in bc_candidates:
-            bc_id_short = bc.id.replace("BC-", "")
-            bc_aggregates = all_aggregates.get(bc.id, [])
+        for bc in session.bounded_contexts:
+            bc_aggregates = session.aggregates.get(bc.id, [])
             
             for agg in bc_aggregates:
-                commands = all_commands.get(agg.id, [])
-                if not commands:
-                    continue
-                
-                commands_text = "\n".join([
-                    f"- {cmd.name}: {cmd.description}" if hasattr(cmd, 'description') else f"- {cmd.name}"
-                    for cmd in commands
-                ])
-                
-                prompt = EXTRACT_EVENTS_PROMPT.format(
-                    aggregate_name=agg.name,
-                    bc_name=bc.name,
-                    bc_short=bc_id_short,
-                    commands=commands_text
-                )
-                
-                structured_llm = llm.with_structured_output(EventList)
-                
-                try:
-                    evt_response = structured_llm.invoke([
-                        SystemMessage(content=SYSTEM_PROMPT),
-                        HumanMessage(content=prompt)
-                    ])
-                    events = evt_response.events
-                except Exception:
-                    events = []
-                
+                commands = session.commands.get(agg.id, [])
+                events = extract_events_for_aggregate(agg, bc, commands, feedback)
                 all_events[agg.id] = events
                 
                 for i, evt in enumerate(events):
                     cmd_id = commands[i].id if i < len(commands) else commands[0].id if commands else None
                     
                     if cmd_id:
-                        client.create_event(
-                            id=evt.id,
-                            name=evt.name,
-                            command_id=cmd_id
-                        )
+                        try:
+                            client.create_event(
+                                id=evt.id,
+                                name=evt.name,
+                                command_id=cmd_id
+                            )
+                        except Exception:
+                            pass
                         
-                        yield ProgressEvent(
-                            phase=IngestionPhase.EXTRACTING_EVENTS,
+                        yield StepEvent(
+                            step=WorkflowStep.EVENTS,
+                            status="processing",
                             message=f"Event 생성: {evt.name}",
                             progress=80,
                             data={
@@ -565,59 +929,56 @@ async def run_ingestion_workflow(
                                 }
                             }
                         )
-                        await asyncio.sleep(0.1)
+                        await asyncio.sleep(0.05)
+                        
+                        all_evt_items.append({
+                            "id": evt.id,
+                            "name": evt.name,
+                            "commandId": cmd_id,
+                            "aggregateName": agg.name
+                        })
         
-        # Phase 7: Identify Policies
-        yield ProgressEvent(
-            phase=IngestionPhase.IDENTIFYING_POLICIES,
+        session.events = all_events
+        
+        # Request review
+        yield StepEvent(
+            step=WorkflowStep.EVENTS,
+            status="review_required",
+            message=f"{len(all_evt_items)}개 Event 추출 완료 - 검토해주세요",
+            progress=85,
+            items=all_evt_items,
+            waitForReview=True
+        )
+        
+        session.waiting_for_review = True
+        while session.waiting_for_review:
+            await asyncio.sleep(0.1)
+        
+        # ===================
+        # STEP 7: Policies
+        # ===================
+        session.current_step = WorkflowStep.POLICIES
+        
+        yield StepEvent(
+            step=WorkflowStep.POLICIES,
+            status="processing",
             message="Policy 식별 중...",
             progress=90
         )
         
-        from agent.nodes import PolicyList
-        from agent.prompts import IDENTIFY_POLICIES_PROMPT
+        feedback = session.regenerate_with_feedback
+        session.regenerate_with_feedback = None
         
-        # Collect all events for policy identification
-        all_events_list = []
-        for agg_id, events in all_events.items():
-            for evt in events:
-                all_events_list.append(f"- {evt.name}")
-        
-        events_text = "\n".join(all_events_list)
-        
-        # Collect commands by BC
-        commands_by_bc = {}
-        for bc in bc_candidates:
-            bc_cmds = []
-            for agg in all_aggregates.get(bc.id, []):
-                for cmd in all_commands.get(agg.id, []):
-                    bc_cmds.append(f"- {cmd.name}")
-            commands_by_bc[bc.name] = "\n".join(bc_cmds) if bc_cmds else "No commands"
-        
-        commands_text = "\n".join([
-            f"{bc_name}:\n{cmds}" for bc_name, cmds in commands_by_bc.items()
-        ])
-        
-        bc_text = "\n".join([
-            f"- {bc.name}: {bc.description}" for bc in bc_candidates
-        ])
-        
-        prompt = IDENTIFY_POLICIES_PROMPT.format(
-            events=events_text,
-            commands_by_bc=commands_text,
-            bounded_contexts=bc_text
+        policies = identify_policies(
+            session.bounded_contexts,
+            session.aggregates,
+            session.commands,
+            session.events,
+            feedback
         )
+        session.policies = policies
         
-        structured_llm = llm.with_structured_output(PolicyList)
-        
-        try:
-            pol_response = structured_llm.invoke([
-                SystemMessage(content=SYSTEM_PROMPT),
-                HumanMessage(content=prompt)
-            ])
-            policies = pol_response.policies
-        except Exception:
-            policies = []
+        all_pol_items = []
         
         for pol in policies:
             # Find trigger event and invoke command IDs
@@ -625,17 +986,17 @@ async def run_ingestion_workflow(
             invoke_command_id = None
             target_bc_id = None
             
-            for agg_id, events in all_events.items():
-                for evt in events:
+            for agg_id, evts in session.events.items():
+                for evt in evts:
                     if evt.name == pol.trigger_event:
                         trigger_event_id = evt.id
                         break
             
-            for bc in bc_candidates:
+            for bc in session.bounded_contexts:
                 if bc.name == pol.target_bc or bc.id == pol.target_bc:
                     target_bc_id = bc.id
-                    for agg in all_aggregates.get(bc.id, []):
-                        for cmd in all_commands.get(agg.id, []):
+                    for agg in session.aggregates.get(bc.id, []):
+                        for cmd in session.commands.get(agg.id, []):
                             if cmd.name == pol.invoke_command:
                                 invoke_command_id = cmd.id
                                 break
@@ -650,44 +1011,74 @@ async def run_ingestion_workflow(
                         invoke_command_id=invoke_command_id,
                         description=pol.description
                     )
-                    
-                    yield ProgressEvent(
-                        phase=IngestionPhase.IDENTIFYING_POLICIES,
-                        message=f"Policy 생성: {pol.name}",
-                        progress=95,
-                        data={
-                            "type": "Policy",
-                            "object": {
-                                "id": pol.id,
-                                "name": pol.name,
-                                "type": "Policy",
-                                "parentId": target_bc_id
-                            }
-                        }
-                    )
                 except Exception:
                     pass
+                
+                yield StepEvent(
+                    step=WorkflowStep.POLICIES,
+                    status="processing",
+                    message=f"Policy 생성: {pol.name}",
+                    progress=95,
+                    data={
+                        "type": "Policy",
+                        "object": {
+                            "id": pol.id,
+                            "name": pol.name,
+                            "type": "Policy",
+                            "parentId": target_bc_id
+                        }
+                    }
+                )
+                await asyncio.sleep(0.1)
+                
+                all_pol_items.append({
+                    "id": pol.id,
+                    "name": pol.name,
+                    "triggerEvent": pol.trigger_event,
+                    "invokeCommand": pol.invoke_command,
+                    "description": pol.description
+                })
         
-        # Complete
-        yield ProgressEvent(
-            phase=IngestionPhase.COMPLETE,
+        # Request review
+        yield StepEvent(
+            step=WorkflowStep.POLICIES,
+            status="review_required",
+            message=f"{len(all_pol_items)}개 Policy 식별 완료 - 검토해주세요",
+            progress=98,
+            items=all_pol_items,
+            waitForReview=True
+        )
+        
+        session.waiting_for_review = True
+        while session.waiting_for_review:
+            await asyncio.sleep(0.1)
+        
+        # ===================
+        # COMPLETE
+        # ===================
+        session.current_step = WorkflowStep.COMPLETE
+        
+        yield StepEvent(
+            step=WorkflowStep.COMPLETE,
+            status="completed",
             message="✅ 모델 생성 완료!",
             progress=100,
             data={
                 "summary": {
-                    "user_stories": len(user_stories),
-                    "bounded_contexts": len(bc_candidates),
-                    "aggregates": sum(len(aggs) for aggs in all_aggregates.values()),
-                    "commands": sum(len(cmds) for cmds in all_commands.values()),
-                    "events": sum(len(evts) for evts in all_events.values()),
-                    "policies": len(policies)
+                    "user_stories": len(session.user_stories),
+                    "bounded_contexts": len(session.bounded_contexts),
+                    "aggregates": sum(len(aggs) for aggs in session.aggregates.values()),
+                    "commands": sum(len(cmds) for cmds in session.commands.values()),
+                    "events": sum(len(evts) for evts in session.events.values()),
+                    "policies": len([p for p in session.policies])
                 }
             }
         )
         
     except Exception as e:
-        yield ProgressEvent(
-            phase=IngestionPhase.ERROR,
+        yield StepEvent(
+            step=WorkflowStep.ERROR,
+            status="error",
             message=f"❌ 오류 발생: {str(e)}",
             progress=0,
             data={"error": str(e)}
@@ -706,7 +1097,6 @@ async def upload_document(
 ) -> dict[str, Any]:
     """
     Upload a requirements document (text or PDF) to start ingestion.
-    
     Returns a session_id for SSE streaming of progress.
     """
     content = ""
@@ -718,7 +1108,6 @@ async def upload_document(
         if filename.lower().endswith('.pdf'):
             content = extract_text_from_pdf(file_content)
         else:
-            # Assume text file
             try:
                 content = file_content.decode('utf-8')
             except UnicodeDecodeError:
@@ -752,8 +1141,7 @@ async def upload_document(
 async def stream_progress(session_id: str):
     """
     SSE endpoint for streaming ingestion progress.
-    
-    Client should connect after receiving session_id from /upload.
+    Pauses at each step for user review.
     """
     session = get_session(session_id)
     
@@ -761,10 +1149,9 @@ async def stream_progress(session_id: str):
         raise HTTPException(status_code=404, detail="Session not found")
     
     async def event_generator():
-        async for event in run_ingestion_workflow(session, session.content):
-            add_event(session, event)
+        async for event in run_step_workflow(session):
             yield {
-                "event": "progress",
+                "event": "step",
                 "data": event.model_dump_json()
             }
         
@@ -775,15 +1162,70 @@ async def stream_progress(session_id: str):
     return EventSourceResponse(event_generator())
 
 
+@router.post("/{session_id}/review")
+async def submit_review(session_id: str, review: ReviewAction) -> dict[str, Any]:
+    """
+    Submit user review for current step.
+    
+    Actions:
+    - 'approve': Continue to next step
+    - 'regenerate': Regenerate current step with feedback
+    """
+    session = get_session(session_id)
+    
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+    
+    if not session.waiting_for_review:
+        raise HTTPException(status_code=400, detail="Not waiting for review")
+    
+    if review.action == "approve":
+        session.waiting_for_review = False
+        session.should_continue = True
+        return {"status": "approved", "step": session.current_step.value}
+    
+    elif review.action == "regenerate":
+        if not review.feedback:
+            raise HTTPException(status_code=400, detail="Feedback required for regeneration")
+        
+        session.regenerate_with_feedback = review.feedback
+        session.feedback_history.append({
+            "step": session.current_step.value,
+            "feedback": review.feedback
+        })
+        session.waiting_for_review = False
+        return {"status": "regenerating", "step": session.current_step.value, "feedback": review.feedback}
+    
+    else:
+        raise HTTPException(status_code=400, detail=f"Unknown action: {review.action}")
+
+
+@router.get("/{session_id}/status")
+async def get_session_status(session_id: str) -> dict[str, Any]:
+    """Get current status of an ingestion session."""
+    session = get_session(session_id)
+    
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+    
+    return {
+        "id": session.id,
+        "current_step": session.current_step.value,
+        "waiting_for_review": session.waiting_for_review,
+        "user_stories_count": len(session.user_stories),
+        "bounded_contexts_count": len(session.bounded_contexts),
+        "feedback_history": session.feedback_history
+    }
+
+
 @router.get("/sessions")
 async def list_sessions() -> list[dict[str, Any]]:
     """List all active ingestion sessions."""
     return [
         {
             "id": s.id,
-            "status": s.status.value,
-            "progress": s.progress,
-            "message": s.message
+            "current_step": s.current_step.value,
+            "waiting_for_review": s.waiting_for_review
         }
         for s in _sessions.values()
     ]
@@ -791,32 +1233,24 @@ async def list_sessions() -> list[dict[str, Any]]:
 
 @router.delete("/clear-all")
 async def clear_all_data() -> dict[str, Any]:
-    """
-    Clear all nodes and relationships from Neo4j.
-    Used before starting a fresh ingestion.
-    """
+    """Clear all nodes and relationships from Neo4j."""
     from agent.neo4j_client import get_neo4j_client
     
     client = get_neo4j_client()
     
     try:
-        with client.session() as session:
-            # Get counts before deletion
+        with client.session() as db_session:
             count_query = """
             MATCH (n)
             WITH labels(n)[0] as label, count(n) as count
             RETURN collect({label: label, count: count}) as counts
             """
-            result = session.run(count_query)
+            result = db_session.run(count_query)
             record = result.single()
             before_counts = {item["label"]: item["count"] for item in record["counts"]} if record else {}
             
-            # Delete all nodes and relationships
-            delete_query = """
-            MATCH (n)
-            DETACH DELETE n
-            """
-            session.run(delete_query)
+            delete_query = "MATCH (n) DETACH DELETE n"
+            db_session.run(delete_query)
             
             return {
                 "success": True,
@@ -833,21 +1267,19 @@ async def clear_all_data() -> dict[str, Any]:
 
 @router.get("/stats")
 async def get_data_stats() -> dict[str, Any]:
-    """
-    Get current data statistics from Neo4j.
-    """
+    """Get current data statistics from Neo4j."""
     from agent.neo4j_client import get_neo4j_client
     
     client = get_neo4j_client()
     
     try:
-        with client.session() as session:
+        with client.session() as db_session:
             query = """
             MATCH (n)
             WITH labels(n)[0] as label, count(n) as count
             RETURN collect({label: label, count: count}) as counts
             """
-            result = session.run(query)
+            result = db_session.run(query)
             record = result.single()
             counts = {item["label"]: item["count"] for item in record["counts"]} if record else {}
             
@@ -865,4 +1297,3 @@ async def get_data_stats() -> dict[str, Any]:
             "hasData": False,
             "error": str(e)
         }
-

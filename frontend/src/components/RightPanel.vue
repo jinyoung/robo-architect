@@ -12,6 +12,7 @@ import EventNode from './nodes/EventNode.vue'
 import PolicyNode from './nodes/PolicyNode.vue'
 import AggregateNode from './nodes/AggregateNode.vue'
 import BoundedContextNode from './nodes/BoundedContextNode.vue'
+import UserStoryNode from './nodes/UserStoryNode.vue'
 
 const canvasStore = useCanvasStore()
 const isDragOver = ref(false)
@@ -24,7 +25,8 @@ const nodeTypes = {
   event: EventNode,
   policy: PolicyNode,
   aggregate: AggregateNode,
-  boundedcontext: BoundedContextNode
+  boundedcontext: BoundedContextNode,
+  userstory: UserStoryNode
 }
 
 // MiniMap node color
@@ -34,7 +36,8 @@ function getNodeColor(node) {
     event: '#fd7e14',
     policy: '#b197fc',
     aggregate: '#fcc419',
-    boundedcontext: '#373a40'
+    boundedcontext: '#373a40',
+    userstory: '#20c997'
   }
   return colors[node.type] || '#909296'
 }
@@ -237,6 +240,14 @@ function onNodesChange(changes) {
 
 .vue-flow__node-boundedcontext {
   z-index: 0 !important;
+}
+
+/* UserStory node styling */
+.vue-flow__node-userstory {
+  padding: 0 !important;
+  border-radius: 10px !important;
+  background: transparent !important;
+  border: none !important;
 }
 
 /* Vue Flow Minimap custom styles */

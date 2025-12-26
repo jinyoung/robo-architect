@@ -41,6 +41,11 @@ export const useCanvasStore = defineStore('canvas', () => {
       color: '#373a40', 
       width: 400,
       height: 300
+    },
+    UserStory: {
+      color: '#20c997',
+      width: 180,
+      height: 90
     }
   }
   
@@ -53,16 +58,16 @@ export const useCanvasStore = defineStore('canvas', () => {
   }
   
   // Get or create BC container for a given BC ID
-  function getOrCreateBCContainer(bcId, bcName, bcDescription, startCollapsed = true) {
+  function getOrCreateBCContainer(bcId, bcName, bcDescription, startCollapsed = false) {
     // Check if BC container already exists
     let bcNode = nodes.value.find(n => n.id === bcId && n.type === 'boundedcontext')
     
     if (!bcNode) {
       // Create new BC container
       const existingBCs = nodes.value.filter(n => n.type === 'boundedcontext')
-      const offsetX = existingBCs.length * 450
+      const offsetX = existingBCs.length * 500
       
-      // Start collapsed by default
+      // Start expanded by default for better visibility
       collapsedBCs.value[bcId] = startCollapsed
       
       bcNode = {
@@ -82,7 +87,7 @@ export const useCanvasStore = defineStore('canvas', () => {
           height: '60px'
         } : {
           width: '550px',
-          height: '350px'
+          height: '400px'
         },
         // Make it a group node
         className: 'bc-group-node'
@@ -90,6 +95,10 @@ export const useCanvasStore = defineStore('canvas', () => {
       
       nodes.value.push(bcNode)
       bcContainers.value[bcId] = { nodeIds: [], bounds: {} }
+    } else if (collapsedBCs.value[bcId]) {
+      // If BC exists but is collapsed, expand it when adding new children
+      // This ensures new nodes are visible
+      toggleBCCollapse(bcId)
     }
     
     return bcNode
@@ -133,12 +142,13 @@ export const useCanvasStore = defineStore('canvas', () => {
     if (bcNodeIndex === -1) return
     
     const bcNode = nodes.value[bcNodeIndex]
-    const children = nodes.value.filter(n => n.parentNode === bcId && !n.hidden)
+    // Include all children, not just visible ones
+    const children = nodes.value.filter(n => n.parentNode === bcId)
     
     if (children.length === 0) {
       nodes.value[bcNodeIndex] = {
         ...bcNode,
-        style: { width: '550px', height: '350px' }
+        style: { width: '550px', height: '400px' }
       }
       return
     }
@@ -150,27 +160,34 @@ export const useCanvasStore = defineStore('canvas', () => {
     
     children.forEach(child => {
       const config = nodeTypeConfig[child.data?.type] || { width: 140, height: 80 }
-      const left = child.position.x
-      const right = child.position.x + config.width
-      const bottom = child.position.y + config.height
+      const left = child.position?.x || 0
+      const right = (child.position?.x || 0) + config.width
+      const bottom = (child.position?.y || 0) + config.height
       
       minX = Math.min(minX, left)
       maxX = Math.max(maxX, right)
       maxY = Math.max(maxY, bottom)
     })
     
-    // Add padding
-    const padding = 40
+    // Add padding - increased for better visibility
+    const padding = 60
+    const headerHeight = 60
     const newWidth = Math.max(550, maxX + padding)
-    const newHeight = Math.max(350, maxY + padding)
+    const newHeight = Math.max(400, maxY + padding + headerHeight)
     
     nodes.value[bcNodeIndex] = {
       ...bcNode,
+      data: { ...bcNode.data, collapsed: false },
       style: {
         width: `${newWidth}px`,
         height: `${newHeight}px`
       }
     }
+    
+    // Also ensure children are not hidden
+    children.forEach(child => {
+      child.hidden = false
+    })
   }
   
   // Add a node to canvas (within its BC container)
@@ -328,17 +345,22 @@ export const useCanvasStore = defineStore('canvas', () => {
         }
         
         // Add children with proper layout
-        // Layout: Policy(왼쪽) → Command(왼쪽) → Aggregate(중앙) → Event(오른쪽)
+        // Layout: Policy(왼쪽) → Command(왼쪽) → Aggregate(중앙) → Event(오른쪽) → UserStory(하단)
         const typeGroups = {
           Aggregate: [],
           Command: [],
           Event: [],
-          Policy: []
+          Policy: [],
+          UserStory: [],
+          Other: []  // Catch-all for unknown types
         }
         
         children.forEach(child => {
           if (typeGroups[child.type]) {
             typeGroups[child.type].push(child)
+          } else {
+            // Add to Other group for unknown types
+            typeGroups.Other.push(child)
           }
         })
         
@@ -452,16 +474,53 @@ export const useCanvasStore = defineStore('canvas', () => {
           }
         })
         
-        // Update BC size if not collapsed
-        if (!collapsedBCs.value[bcId]) {
-          updateBCSize(bcId)
-        } else {
-          // If collapsed, hide all children and set small size
-          const childNodes = nodes.value.filter(n => n.parentNode === bcId)
-          childNodes.forEach(child => {
-            child.hidden = true
-          })
-        }
+        // Layout UserStory nodes (below everything else)
+        const usStartY = Math.max(
+          typeGroups.Command.length,
+          typeGroups.Event.length,
+          typeGroups.Aggregate.length
+        ) * (nodeHeight + gapY) + currentY + 40
+        
+        typeGroups.UserStory.forEach((us, idx) => {
+          if (!isOnCanvas(us.id)) {
+            const node = {
+              id: us.id,
+              type: 'userstory',
+              position: { x: padding + idx * 200, y: usStartY },
+              data: { ...us, label: us.name || `${us.role}: ${us.action?.substring(0, 20)}` },
+              parentNode: bcId,
+              extent: 'parent'
+            }
+            nodes.value.push(node)
+            newNodes.push(node)
+          }
+        })
+        
+        // Layout Other/unknown type nodes
+        const otherStartY = usStartY + (typeGroups.UserStory.length > 0 ? (nodeHeight + gapY) : 0)
+        typeGroups.Other.forEach((item, idx) => {
+          if (!isOnCanvas(item.id)) {
+            const node = {
+              id: item.id,
+              type: item.type?.toLowerCase() || 'default',
+              position: { x: padding + idx * 160, y: otherStartY },
+              data: { ...item, label: item.name },
+              parentNode: bcId,
+              extent: 'parent'
+            }
+            nodes.value.push(node)
+            newNodes.push(node)
+          }
+        })
+        
+        // Always update BC size and ensure children are visible
+        updateBCSize(bcId)
+        
+        // Ensure all children are visible (not hidden)
+        const childNodes = nodes.value.filter(n => n.parentNode === bcId)
+        childNodes.forEach(child => {
+          child.hidden = false
+        })
         
         bcIndex++
       }

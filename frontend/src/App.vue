@@ -10,18 +10,32 @@ import { useNavigatorStore } from './stores/navigator'
 const canvasStore = useCanvasStore()
 const navigatorStore = useNavigatorStore()
 
-// User Story Edit Modal state
-const showEditModal = ref(false)
+// User Story Modal state (supports both create and edit modes)
+const showModal = ref(false)
+const modalMode = ref('edit') // 'create' or 'edit'
 const editingUserStory = ref(null)
+const targetBcId = ref(null)
 
+// Edit an existing user story
 function handleEditUserStory(userStory) {
   editingUserStory.value = userStory
-  showEditModal.value = true
+  modalMode.value = 'edit'
+  targetBcId.value = null
+  showModal.value = true
 }
 
-function handleCloseEditModal() {
-  showEditModal.value = false
+// Create a new user story (optionally in a specific BC)
+function handleAddUserStory(bcId = null) {
   editingUserStory.value = null
+  modalMode.value = 'create'
+  targetBcId.value = bcId
+  showModal.value = true
+}
+
+function handleCloseModal() {
+  showModal.value = false
+  editingUserStory.value = null
+  targetBcId.value = null
 }
 
 async function handleUserStorySaved() {
@@ -29,9 +43,15 @@ async function handleUserStorySaved() {
   await navigatorStore.refreshAll()
 }
 
-// Provide canvas store and edit function to child components
+async function handleUserStoryCreated() {
+  // Refresh the navigator to show new user story
+  await navigatorStore.refreshAll()
+}
+
+// Provide canvas store and modal functions to child components
 provide('canvasStore', canvasStore)
 provide('editUserStory', handleEditUserStory)
+provide('addUserStory', handleAddUserStory)
 </script>
 
 <template>
@@ -42,12 +62,15 @@ provide('editUserStory', handleEditUserStory)
       <RightPanel />
     </div>
     
-    <!-- User Story Edit Modal -->
+    <!-- User Story Modal (Create & Edit) -->
     <UserStoryEditModal 
-      :visible="showEditModal"
+      :visible="showModal"
+      :mode="modalMode"
       :user-story="editingUserStory"
-      @close="handleCloseEditModal"
+      :target-bc-id="targetBcId"
+      @close="handleCloseModal"
       @saved="handleUserStorySaved"
+      @created="handleUserStoryCreated"
     />
   </div>
 </template>

@@ -1,6 +1,7 @@
 <script setup>
 import { ref, computed, watch, onMounted, onUnmounted } from 'vue'
 import { useChangeStore } from '../stores/change'
+import { useNavigatorStore } from '../stores/navigator'
 
 const props = defineProps({
   userStory: {
@@ -10,29 +11,56 @@ const props = defineProps({
   visible: {
     type: Boolean,
     default: false
+  },
+  // NEW: 'create' or 'edit' mode
+  mode: {
+    type: String,
+    default: 'edit',
+    validator: (v) => ['create', 'edit'].includes(v)
+  },
+  // NEW: Pre-selected BC for create mode
+  targetBcId: {
+    type: String,
+    default: null
   }
 })
 
-const emit = defineEmits(['close', 'saved'])
+const emit = defineEmits(['close', 'saved', 'created'])
 
 const changeStore = useChangeStore()
+const navigatorStore = useNavigatorStore()
 
 // Form state - editable fields
 const editedRole = ref('')
 const editedAction = ref('')
 const editedBenefit = ref('')
 
-// Original values for comparison
+// Original values for comparison (edit mode only)
 const originalRole = ref('')
 const originalAction = ref('')
 const originalBenefit = ref('')
+
+// NEW: Create mode options
+const selectedBcId = ref('')
+const autoAssignBc = ref(true)
+const autoGenerateObjects = ref(true)
 
 // UI state
 const currentStep = ref('edit') // 'edit' | 'analyzing' | 'plan' | 'feedback' | 'applying'
 const feedbackText = ref('')
 
+// NEW: Computed - check if form is valid for create mode
+const isCreateMode = computed(() => props.mode === 'create')
+
+const canCreate = computed(() => {
+  return editedRole.value.trim() && editedAction.value.trim()
+})
+
 // Computed
 const hasChanges = computed(() => {
+  if (isCreateMode.value) {
+    return canCreate.value
+  }
   return editedRole.value !== originalRole.value ||
     editedAction.value !== originalAction.value ||
     editedBenefit.value !== originalBenefit.value
@@ -52,14 +80,22 @@ const changedFields = computed(() => {
   return changes
 })
 
-// Watch for userStory changes
+// Watch for userStory changes (edit mode)
 watch(() => props.userStory, (newVal) => {
-  if (newVal) {
+  if (newVal && !isCreateMode.value) {
     editedRole.value = originalRole.value = newVal.role || ''
     editedAction.value = originalAction.value = newVal.action || ''
     editedBenefit.value = originalBenefit.value = newVal.benefit || ''
     currentStep.value = 'edit'
     feedbackText.value = ''
+  }
+}, { immediate: true })
+
+// Watch for targetBcId changes (create mode)
+watch(() => props.targetBcId, (newVal) => {
+  if (newVal) {
+    selectedBcId.value = newVal
+    autoAssignBc.value = false
   }
 }, { immediate: true })
 
@@ -69,6 +105,25 @@ watch(() => props.visible, (visible) => {
     currentStep.value = 'edit'
     feedbackText.value = ''
     changeStore.reset()
+    // Reset create mode fields
+    if (isCreateMode.value) {
+      editedRole.value = ''
+      editedAction.value = ''
+      editedBenefit.value = ''
+      selectedBcId.value = props.targetBcId || ''
+      autoAssignBc.value = !props.targetBcId
+      autoGenerateObjects.value = true
+    }
+  } else if (isCreateMode.value) {
+    // Initialize create mode
+    editedRole.value = ''
+    editedAction.value = ''
+    editedBenefit.value = ''
+    originalRole.value = ''
+    originalAction.value = ''
+    originalBenefit.value = ''
+    selectedBcId.value = props.targetBcId || ''
+    autoAssignBc.value = !props.targetBcId
   }
 })
 
@@ -92,8 +147,54 @@ function handleClose() {
   emit('close')
 }
 
+// NEW: Create User Story (create mode)
+async function createUserStory() {
+  if (!canCreate.value) return
+  
+  currentStep.value = 'analyzing'
+  
+  try {
+    // Call the add user story API
+    const response = await fetch('/api/user-story/add', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        role: editedRole.value,
+        action: editedAction.value,
+        benefit: editedBenefit.value,
+        targetBcId: autoAssignBc.value ? null : selectedBcId.value,
+        autoGenerate: autoGenerateObjects.value
+      })
+    })
+    
+    if (!response.ok) {
+      throw new Error('Failed to create user story')
+    }
+    
+    const result = await response.json()
+    
+    // Update change store with the generated plan for display
+    changeStore.changeScope = result.scope || 'local'
+    changeStore.scopeReasoning = result.scopeReasoning || 'New user story created'
+    changeStore.impactedNodes = []
+    changeStore.relatedObjects = result.relatedObjects || []
+    changeStore.changePlan = result.changes || []
+    changeStore.planSummary = result.summary || ''
+    
+    currentStep.value = 'plan'
+  } catch (error) {
+    console.error('Failed to create user story:', error)
+    currentStep.value = 'edit'
+  }
+}
+
 async function analyzeImpact() {
   if (!hasChanges.value) return
+  
+  // For create mode, use different flow
+  if (isCreateMode.value) {
+    return createUserStory()
+  }
   
   currentStep.value = 'analyzing'
   
@@ -115,8 +216,36 @@ async function approvePlan() {
   currentStep.value = 'applying'
   
   try {
-    await changeStore.applyChanges(props.userStory.id)
-    emit('saved')
+    if (isCreateMode.value) {
+      // For create mode, apply the generated changes
+      const response = await fetch('/api/user-story/apply', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          userStory: {
+            role: editedRole.value,
+            action: editedAction.value,
+            benefit: editedBenefit.value
+          },
+          targetBcId: autoAssignBc.value ? null : selectedBcId.value,
+          changePlan: changeStore.changePlan
+        })
+      })
+      
+      if (!response.ok) {
+        throw new Error('Failed to apply changes')
+      }
+      
+      // Refresh navigator to show new objects
+      await navigatorStore.refreshAll()
+      
+      emit('created')
+    } else {
+      await changeStore.applyChanges(props.userStory.id)
+      // Refresh navigator after edit
+      await navigatorStore.refreshAll()
+      emit('saved')
+    }
     handleClose()
   } catch (error) {
     console.error('Failed to apply changes:', error)
@@ -196,10 +325,10 @@ function getActionLabel(action) {
           <!-- Header -->
           <div class="modal-header">
             <h2 class="modal-title">
-              <span class="modal-title__icon">📝</span>
-              {{ currentStep === 'edit' ? 'Edit User Story' : 
-                 currentStep === 'analyzing' ? 'Analyzing Impact...' :
-                 currentStep === 'plan' ? 'Change Plan Review' :
+              <span class="modal-title__icon">{{ isCreateMode ? '➕' : '📝' }}</span>
+              {{ currentStep === 'edit' ? (isCreateMode ? 'Add User Story' : 'Edit User Story') : 
+                 currentStep === 'analyzing' ? (isCreateMode ? 'Generating Plan...' : 'Analyzing Impact...') :
+                 currentStep === 'plan' ? (isCreateMode ? 'Generation Plan Review' : 'Change Plan Review') :
                  currentStep === 'feedback' ? 'Provide Feedback' :
                  'Applying Changes...' }}
             </h2>
@@ -215,7 +344,7 @@ function getActionLabel(action) {
           <div class="modal-content">
             <!-- Step 1: Edit Form -->
             <div v-if="currentStep === 'edit'" class="edit-form">
-              <div class="story-id">{{ userStory?.id }}</div>
+              <div v-if="!isCreateMode" class="story-id">{{ userStory?.id }}</div>
               
               <div class="form-group">
                 <label class="form-label">As a</label>
@@ -247,8 +376,37 @@ function getActionLabel(action) {
                 ></textarea>
               </div>
               
-              <!-- Changes Preview -->
-              <div v-if="hasChanges" class="changes-preview">
+              <!-- NEW: Create Mode Options -->
+              <div v-if="isCreateMode" class="create-options">
+                <div class="option-group">
+                  <label class="option-label">
+                    <input type="checkbox" v-model="autoAssignBc" class="option-checkbox" />
+                    <span class="option-text">자동으로 적합한 BC에 배치</span>
+                  </label>
+                  <p class="option-hint">시스템이 User Story를 분석하여 가장 적합한 Bounded Context를 찾습니다</p>
+                </div>
+                
+                <div v-if="!autoAssignBc" class="form-group">
+                  <label class="form-label">Target Bounded Context</label>
+                  <select v-model="selectedBcId" class="form-select">
+                    <option value="">BC 선택...</option>
+                    <option v-for="bc in navigatorStore.contexts" :key="bc.id" :value="bc.id">
+                      {{ bc.name }}
+                    </option>
+                  </select>
+                </div>
+                
+                <div class="option-group">
+                  <label class="option-label">
+                    <input type="checkbox" v-model="autoGenerateObjects" class="option-checkbox" />
+                    <span class="option-text">관련 객체 자동 생성</span>
+                  </label>
+                  <p class="option-hint">Aggregate, Command, Event 등을 자동으로 생성하고 연결합니다</p>
+                </div>
+              </div>
+              
+              <!-- Changes Preview (edit mode only) -->
+              <div v-if="!isCreateMode && hasChanges" class="changes-preview">
                 <div class="changes-preview__title">
                   <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                     <circle cx="12" cy="12" r="10"></circle>
@@ -264,6 +422,20 @@ function getActionLabel(action) {
                     <span class="change-arrow">→</span>
                     <span class="change-to">{{ change.to || '(empty)' }}</span>
                   </div>
+                </div>
+              </div>
+              
+              <!-- Create Mode Preview -->
+              <div v-if="isCreateMode && canCreate" class="create-preview">
+                <div class="create-preview__title">
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <path d="M12 5v14M5 12h14"></path>
+                  </svg>
+                  New User Story
+                </div>
+                <div class="create-preview__content">
+                  <span class="us-badge">US</span>
+                  <span class="us-text">As a <strong>{{ editedRole }}</strong>, I want to <strong>{{ editedAction }}</strong></span>
                 </div>
               </div>
             </div>
@@ -431,10 +603,15 @@ function getActionLabel(action) {
                 @click="analyzeImpact"
               >
                 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                  <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"></path>
-                  <polyline points="22 4 12 14.01 9 11.01"></polyline>
+                  <template v-if="isCreateMode">
+                    <path d="M12 5v14M5 12h14"></path>
+                  </template>
+                  <template v-else>
+                    <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"></path>
+                    <polyline points="22 4 12 14.01 9 11.01"></polyline>
+                  </template>
                 </svg>
-                Analyze Impact
+                {{ isCreateMode ? 'Generate Plan' : 'Analyze Impact' }}
               </button>
             </template>
             
@@ -690,6 +867,109 @@ function getActionLabel(action) {
 .form-textarea {
   resize: vertical;
   min-height: 60px;
+}
+
+/* Create Mode Options */
+.create-options {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-md);
+  padding: var(--spacing-md);
+  background: var(--color-bg);
+  border-radius: var(--radius-md);
+  border: 1px solid var(--color-border);
+}
+
+.option-group {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.option-label {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-sm);
+  cursor: pointer;
+}
+
+.option-checkbox {
+  width: 16px;
+  height: 16px;
+  accent-color: var(--color-accent);
+}
+
+.option-text {
+  font-size: 0.9rem;
+  color: var(--color-text-bright);
+  font-weight: 500;
+}
+
+.option-hint {
+  font-size: 0.75rem;
+  color: var(--color-text-light);
+  margin-left: 24px;
+  margin-top: 2px;
+}
+
+.form-select {
+  padding: 10px 14px;
+  background: var(--color-bg-secondary);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  color: var(--color-text-bright);
+  font-size: 0.95rem;
+  font-family: inherit;
+  cursor: pointer;
+}
+
+.form-select:focus {
+  outline: none;
+  border-color: var(--color-accent);
+}
+
+/* Create Preview */
+.create-preview {
+  background: rgba(32, 201, 151, 0.1);
+  border: 1px solid rgba(32, 201, 151, 0.3);
+  border-radius: var(--radius-md);
+  padding: var(--spacing-md);
+}
+
+.create-preview__title {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-xs);
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: #20c997;
+  margin-bottom: var(--spacing-sm);
+}
+
+.create-preview__content {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--spacing-sm);
+}
+
+.us-badge {
+  flex-shrink: 0;
+  padding: 2px 6px;
+  background: #20c997;
+  color: white;
+  font-size: 0.65rem;
+  font-weight: 600;
+  border-radius: var(--radius-sm);
+}
+
+.us-text {
+  font-size: 0.85rem;
+  color: var(--color-text);
+  line-height: 1.4;
+}
+
+.us-text strong {
+  color: var(--color-text-bright);
 }
 
 /* Changes Preview */
