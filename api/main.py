@@ -84,6 +84,105 @@ async def health_check():
         return {"status": "unhealthy", "error": str(e)}
 
 
+@app.delete("/api/graph/clear")
+async def clear_all_nodes():
+    """
+    DELETE /graph/clear - 모든 노드와 관계 삭제
+    새로운 인제스션 전에 기존 데이터를 모두 삭제합니다.
+    """
+    query = """
+    MATCH (n)
+    DETACH DELETE n
+    """
+    with get_session() as session:
+        result = session.run(query)
+        summary = result.consume()
+        return {
+            "status": "cleared",
+            "nodes_deleted": summary.counters.nodes_deleted,
+            "relationships_deleted": summary.counters.relationships_deleted
+        }
+
+
+@app.get("/api/graph/stats")
+async def get_graph_stats():
+    """
+    GET /graph/stats - 그래프 통계 조회
+    현재 Neo4j에 저장된 노드 수를 반환합니다.
+    """
+    query = """
+    MATCH (n)
+    WITH labels(n)[0] as label, count(n) as count
+    RETURN collect({label: label, count: count}) as stats
+    """
+    with get_session() as session:
+        result = session.run(query)
+        record = result.single()
+        if record:
+            stats = {item["label"]: item["count"] for item in record["stats"] if item["label"]}
+            total = sum(stats.values())
+            return {"total": total, "by_type": stats}
+        return {"total": 0, "by_type": {}}
+
+
+@app.delete("/api/graph/clear")
+async def clear_all_nodes():
+    """
+    DELETE /graph/clear - 모든 노드 삭제
+    Clears all nodes and relationships from the graph.
+    Used before starting a new ingestion.
+    """
+    query = """
+    MATCH (n)
+    DETACH DELETE n
+    """
+    count_query = """
+    MATCH (n)
+    RETURN count(n) as count
+    """
+    
+    with get_session() as session:
+        # Get count before deletion
+        count_result = session.run(count_query)
+        count_before = count_result.single()["count"]
+        
+        # Delete all nodes
+        session.run(query)
+        
+        return {
+            "success": True,
+            "deleted_nodes": count_before,
+            "message": f"Deleted {count_before} nodes and all relationships"
+        }
+
+
+@app.get("/api/graph/stats")
+async def get_graph_stats():
+    """
+    GET /graph/stats - 그래프 통계 조회
+    Returns count of each node type.
+    """
+    query = """
+    MATCH (n)
+    WITH labels(n)[0] as label, count(n) as count
+    RETURN collect({label: label, count: count}) as stats
+    """
+    
+    with get_session() as session:
+        result = session.run(query)
+        record = result.single()
+        stats = record["stats"] if record else []
+        
+        # Convert to dict
+        stats_dict = {item["label"]: item["count"] for item in stats if item["label"]}
+        total = sum(stats_dict.values())
+        
+        return {
+            "total": total,
+            "by_type": stats_dict
+        }
+
+
 @app.get("/api/user-stories")
 async def get_all_user_stories() -> list[dict[str, Any]]:
     """

@@ -788,3 +788,81 @@ async def list_sessions() -> list[dict[str, Any]]:
         for s in _sessions.values()
     ]
 
+
+@router.delete("/clear-all")
+async def clear_all_data() -> dict[str, Any]:
+    """
+    Clear all nodes and relationships from Neo4j.
+    Used before starting a fresh ingestion.
+    """
+    from agent.neo4j_client import get_neo4j_client
+    
+    client = get_neo4j_client()
+    
+    try:
+        with client.session() as session:
+            # Get counts before deletion
+            count_query = """
+            MATCH (n)
+            WITH labels(n)[0] as label, count(n) as count
+            RETURN collect({label: label, count: count}) as counts
+            """
+            result = session.run(count_query)
+            record = result.single()
+            before_counts = {item["label"]: item["count"] for item in record["counts"]} if record else {}
+            
+            # Delete all nodes and relationships
+            delete_query = """
+            MATCH (n)
+            DETACH DELETE n
+            """
+            session.run(delete_query)
+            
+            return {
+                "success": True,
+                "message": "모든 데이터가 삭제되었습니다",
+                "deleted": before_counts
+            }
+    except Exception as e:
+        return {
+            "success": False,
+            "message": f"삭제 실패: {str(e)}",
+            "deleted": {}
+        }
+
+
+@router.get("/stats")
+async def get_data_stats() -> dict[str, Any]:
+    """
+    Get current data statistics from Neo4j.
+    """
+    from agent.neo4j_client import get_neo4j_client
+    
+    client = get_neo4j_client()
+    
+    try:
+        with client.session() as session:
+            query = """
+            MATCH (n)
+            WITH labels(n)[0] as label, count(n) as count
+            RETURN collect({label: label, count: count}) as counts
+            """
+            result = session.run(query)
+            record = result.single()
+            counts = {item["label"]: item["count"] for item in record["counts"]} if record else {}
+            
+            total = sum(counts.values())
+            
+            return {
+                "total": total,
+                "counts": counts,
+                "hasData": total > 0
+            }
+    except Exception as e:
+        return {
+            "total": 0,
+            "counts": {},
+            "hasData": False,
+            "error": str(e)
+        }
+

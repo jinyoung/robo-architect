@@ -138,7 +138,177 @@ export const useNavigatorStore = defineStore('navigator', () => {
     }, 2000)
   }
   
-  // Dynamically add an item to a context tree (used during ingestion)
+  // Dynamically add an Aggregate to a BC's tree (used during ingestion)
+  function addAggregate(aggregateData) {
+    const bcId = aggregateData.parentId
+    
+    // Ensure the tree exists
+    if (!contextTrees.value[bcId]) {
+      contextTrees.value[bcId] = {
+        id: bcId,
+        aggregates: [],
+        policies: [],
+        userStories: []
+      }
+    }
+    
+    // Check if already exists
+    const tree = contextTrees.value[bcId]
+    const exists = tree.aggregates?.some(a => a.id === aggregateData.id)
+    if (!exists) {
+      if (!tree.aggregates) tree.aggregates = []
+      tree.aggregates.push({
+        id: aggregateData.id,
+        name: aggregateData.name,
+        type: 'Aggregate',
+        commands: [],
+        events: []
+      })
+      
+      // Force reactivity update
+      contextTrees.value = { ...contextTrees.value }
+      
+      // Update BC's aggregate count
+      const bc = contexts.value.find(c => c.id === bcId)
+      if (bc) {
+        bc.aggregateCount = (bc.aggregateCount || 0) + 1
+      }
+      
+      // Mark as newly added and expand BC
+      markAsNew(aggregateData.id)
+      expandedNodes.value.add(bcId)
+      expandedNodes.value = new Set(expandedNodes.value)
+    }
+  }
+  
+  // Dynamically add a Command to an Aggregate (used during ingestion)
+  function addCommand(commandData) {
+    const aggId = commandData.parentId
+    
+    // Find the aggregate in any BC's tree
+    for (const bcId in contextTrees.value) {
+      const tree = contextTrees.value[bcId]
+      const aggregate = tree.aggregates?.find(a => a.id === aggId)
+      
+      if (aggregate) {
+        const exists = aggregate.commands?.some(c => c.id === commandData.id)
+        if (!exists) {
+          if (!aggregate.commands) aggregate.commands = []
+          aggregate.commands.push({
+            id: commandData.id,
+            name: commandData.name,
+            type: 'Command',
+            events: []
+          })
+          
+          // Force reactivity update
+          contextTrees.value = { ...contextTrees.value }
+          
+          // Mark as newly added and expand aggregate
+          markAsNew(commandData.id)
+          expandedNodes.value.add(aggId)
+          expandedNodes.value = new Set(expandedNodes.value)
+        }
+        break
+      }
+    }
+  }
+  
+  // Dynamically add an Event to a Command or Aggregate (used during ingestion)
+  function addEvent(eventData) {
+    const parentId = eventData.parentId  // Can be command ID or aggregate ID
+    
+    // Find the parent (command or aggregate) in any BC's tree
+    for (const bcId in contextTrees.value) {
+      const tree = contextTrees.value[bcId]
+      
+      for (const aggregate of (tree.aggregates || [])) {
+        // Check if parentId is a command
+        const command = aggregate.commands?.find(c => c.id === parentId)
+        if (command) {
+          const exists = command.events?.some(e => e.id === eventData.id)
+          if (!exists) {
+            if (!command.events) command.events = []
+            command.events.push({
+              id: eventData.id,
+              name: eventData.name,
+              type: 'Event'
+            })
+            
+            // Also add to aggregate's events for better visibility
+            if (!aggregate.events) aggregate.events = []
+            if (!aggregate.events.some(e => e.id === eventData.id)) {
+              aggregate.events.push({
+                id: eventData.id,
+                name: eventData.name,
+                type: 'Event'
+              })
+            }
+            
+            // Force reactivity update
+            contextTrees.value = { ...contextTrees.value }
+            
+            markAsNew(eventData.id)
+            expandedNodes.value.add(parentId)
+            expandedNodes.value = new Set(expandedNodes.value)
+          }
+          return
+        }
+        
+        // Check if parentId is the aggregate itself
+        if (aggregate.id === parentId) {
+          const exists = aggregate.events?.some(e => e.id === eventData.id)
+          if (!exists) {
+            if (!aggregate.events) aggregate.events = []
+            aggregate.events.push({
+              id: eventData.id,
+              name: eventData.name,
+              type: 'Event'
+            })
+            
+            // Force reactivity update
+            contextTrees.value = { ...contextTrees.value }
+            
+            markAsNew(eventData.id)
+          }
+          return
+        }
+      }
+    }
+  }
+  
+  // Dynamically add a Policy to a BC (used during ingestion)
+  function addPolicy(policyData) {
+    const bcId = policyData.parentId
+    
+    // Ensure the tree exists
+    if (!contextTrees.value[bcId]) {
+      contextTrees.value[bcId] = {
+        id: bcId,
+        aggregates: [],
+        policies: [],
+        userStories: []
+      }
+    }
+    
+    const tree = contextTrees.value[bcId]
+    const exists = tree.policies?.some(p => p.id === policyData.id)
+    if (!exists) {
+      if (!tree.policies) tree.policies = []
+      tree.policies.push({
+        id: policyData.id,
+        name: policyData.name,
+        type: 'Policy'
+      })
+      
+      // Force reactivity update
+      contextTrees.value = { ...contextTrees.value }
+      
+      markAsNew(policyData.id)
+    }
+  }
+  
+  // Generic add item to tree (legacy, for backwards compatibility)
   function addItemToTree(contextId, item) {
     markAsNew(item.id)
   }
@@ -240,6 +410,10 @@ export const useNavigatorStore = defineStore('navigator', () => {
     addContext,
     addUserStory,
     assignUserStoryToBC,
+    addAggregate,
+    addCommand,
+    addEvent,
+    addPolicy,
     addItemToTree,
     isNewlyAdded,
     refreshAll,

@@ -3,9 +3,15 @@ Change Management API for User Story Editing with Impact Analysis
 
 Provides endpoints for:
 - Impact analysis when a User Story is modified
-- LLM-based change plan generation
+- LLM-based change plan generation with LangGraph workflow
+- Vector search for related objects across BCs
 - Human-in-the-loop plan revision
 - Applying approved changes to Neo4j
+
+The workflow now supports:
+1. Scope analysis: Determine if change is LOCAL, CROSS_BC, or NEW_CAPABILITY
+2. Vector search: Find semantically related objects when cross-BC connections are needed
+3. Plan generation: Create comprehensive change plan including new connections
 """
 
 from __future__ import annotations
@@ -80,6 +86,25 @@ class ChangePlanResponse(BaseModel):
     """Response containing the generated change plan."""
     changes: List[dict]
     summary: str
+
+
+class VectorSearchRequest(BaseModel):
+    """Request for vector search of related objects."""
+    query: str
+    nodeTypes: List[str] = Field(default_factory=lambda: ["Command", "Event", "Policy", "Aggregate"])
+    excludeIds: List[str] = Field(default_factory=list)
+    limit: int = 10
+
+
+class VectorSearchResult(BaseModel):
+    """A single result from vector search."""
+    id: str
+    name: str
+    type: str
+    bcId: Optional[str] = None
+    bcName: Optional[str] = None
+    similarity: float
+    description: Optional[str] = None
 
 
 class ApplyChangesRequest(BaseModel):
@@ -204,34 +229,42 @@ async def get_impact_analysis(user_story_id: str) -> dict[str, Any]:
 
 
 @router.post("/plan")
-async def generate_change_plan(request: ChangePlanRequest) -> ChangePlanResponse:
+async def generate_change_plan(request: ChangePlanRequest) -> dict[str, Any]:
     """
-    Generate a change plan using LLM based on the user story changes.
+    Generate a change plan using LangGraph-based workflow.
     
-    This endpoint uses the LLM to analyze:
-    - What changed in the user story
-    - Which connected objects need to be updated
-    - What specific changes should be made to each object
+    This endpoint uses a multi-step workflow:
+    1. Analyze scope: Determine if change is LOCAL, CROSS_BC, or NEW_CAPABILITY
+    2. Vector search: If CROSS_BC, search for related objects in other BCs
+    3. Generate plan: Create comprehensive plan including new connections
     
     If feedback is provided, it will revise the previous plan.
+    
+    Returns:
+    - scope: The determined scope of the change
+    - scopeReasoning: Why this scope was determined
+    - keywords: Keywords used for vector search
+    - relatedObjects: Objects found via vector search (for CROSS_BC)
+    - changes: The proposed changes
+    - summary: Summary of the plan
     """
-    from agent.change_planner import generate_change_plan as llm_generate_plan
+    from agent.change_graph import run_change_planning
     
     try:
-        changes = llm_generate_plan(
+        result = run_change_planning(
             user_story_id=request.userStoryId,
-            original_user_story=request.originalUserStory,
+            original_user_story=request.originalUserStory or {},
             edited_user_story=request.editedUserStory,
-            impacted_nodes=request.impactedNodes,
+            connected_objects=request.impactedNodes,
             feedback=request.feedback,
             previous_plan=request.previousPlan
         )
         
-        return ChangePlanResponse(
-            changes=changes,
-            summary=f"Generated {len(changes)} changes based on user story modification"
-        )
+        return result
+        
     except Exception as e:
+        import traceback
+        traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Failed to generate change plan: {str(e)}")
 
 
@@ -314,11 +347,103 @@ async def apply_changes(request: ApplyChangesRequest) -> ApplyChangesResponse:
                     })
                     
                 elif change.get("action") == "create":
-                    # Create a new node (placeholder - implementation depends on node type)
+                    # Create a new node based on type
+                    target_type = change.get("targetType")
+                    target_id = change.get("targetId")
+                    target_name = change.get("targetName")
+                    target_bc_id = change.get("targetBcId")
+                    
+                    if target_type == "Policy":
+                        create_query = """
+                        MERGE (pol:Policy {id: $pol_id})
+                        SET pol.name = $name,
+                            pol.description = $description,
+                            pol.createdAt = datetime()
+                        WITH pol
+                        OPTIONAL MATCH (bc:BoundedContext {id: $bc_id})
+                        WHERE bc IS NOT NULL
+                        MERGE (bc)-[:HAS_POLICY]->(pol)
+                        RETURN pol.id as id
+                        """
+                        session.run(
+                            create_query,
+                            pol_id=target_id,
+                            name=target_name,
+                            description=change.get("description", ""),
+                            bc_id=target_bc_id
+                        )
+                    elif target_type == "Command":
+                        create_query = """
+                        MERGE (cmd:Command {id: $cmd_id})
+                        SET cmd.name = $name,
+                            cmd.description = $description,
+                            cmd.createdAt = datetime()
+                        RETURN cmd.id as id
+                        """
+                        session.run(
+                            create_query,
+                            cmd_id=target_id,
+                            name=target_name,
+                            description=change.get("description", "")
+                        )
+                    elif target_type == "Event":
+                        create_query = """
+                        MERGE (evt:Event {id: $evt_id})
+                        SET evt.name = $name,
+                            evt.description = $description,
+                            evt.version = 1,
+                            evt.createdAt = datetime()
+                        RETURN evt.id as id
+                        """
+                        session.run(
+                            create_query,
+                            evt_id=target_id,
+                            name=target_name,
+                            description=change.get("description", "")
+                        )
+                    
                     applied_changes.append({
                         **change,
-                        "success": True,
-                        "note": "Creation not fully implemented"
+                        "success": True
+                    })
+                    
+                elif change.get("action") == "connect":
+                    # Create a connection between nodes
+                    connection_type = change.get("connectionType", "TRIGGERS")
+                    source_id = change.get("sourceId")
+                    target_id = change.get("targetId")
+                    
+                    if connection_type == "TRIGGERS":
+                        # Event -> TRIGGERS -> Policy
+                        connect_query = """
+                        MATCH (evt:Event {id: $source_id})
+                        MATCH (pol:Policy {id: $target_id})
+                        MERGE (evt)-[:TRIGGERS {priority: 1, isEnabled: true, createdAt: datetime()}]->(pol)
+                        RETURN evt.id as id
+                        """
+                        session.run(connect_query, source_id=source_id, target_id=target_id)
+                    elif connection_type == "INVOKES":
+                        # Policy -> INVOKES -> Command
+                        connect_query = """
+                        MATCH (pol:Policy {id: $source_id})
+                        MATCH (cmd:Command {id: $target_id})
+                        MERGE (pol)-[:INVOKES {isAsync: true, createdAt: datetime()}]->(cmd)
+                        RETURN pol.id as id
+                        """
+                        session.run(connect_query, source_id=source_id, target_id=target_id)
+                    elif connection_type == "IMPLEMENTS":
+                        # UserStory -> IMPLEMENTS -> Node
+                        connect_query = """
+                        MATCH (us:UserStory {id: $source_id})
+                        MATCH (n {id: $target_id})
+                        MERGE (us)-[:IMPLEMENTS {createdAt: datetime()}]->(n)
+                        RETURN us.id as id
+                        """
+                        session.run(connect_query, source_id=source_id, target_id=target_id)
+                    
+                    applied_changes.append({
+                        **change,
+                        "success": True
                     })
                     
                 elif change.get("action") == "delete":
@@ -376,4 +501,123 @@ async def get_change_history(user_story_id: str) -> list[dict[str, Any]]:
             "current": dict(record["current"]) if record["current"] else None,
             "history": [dict(h) for h in record["history"]]
         }
+
+
+@router.post("/search")
+async def vector_search(request: VectorSearchRequest) -> List[VectorSearchResult]:
+    """
+    Search for related objects using semantic/keyword matching.
+    
+    This is useful for:
+    - Finding objects in other BCs that might be relevant to a change
+    - Discovering existing capabilities (like Notification) that can be connected
+    
+    Returns objects sorted by similarity score.
+    """
+    query = """
+    UNWIND $keywords as keyword
+    MATCH (n)
+    WHERE (
+        ($nodeTypes IS NULL OR any(t IN $nodeTypes WHERE t IN labels(n)))
+    )
+    AND (n:Command OR n:Event OR n:Policy OR n:Aggregate)
+    AND (
+        toLower(n.name) CONTAINS toLower(keyword) 
+        OR toLower(coalesce(n.description, '')) CONTAINS toLower(keyword)
+    )
+    AND NOT n.id IN $excludeIds
+    
+    // Get the BC for each node
+    OPTIONAL MATCH (bc:BoundedContext)-[:HAS_AGGREGATE|HAS_POLICY*1..3]->(n)
+    
+    WITH DISTINCT n, bc,
+         CASE 
+             WHEN toLower(n.name) CONTAINS toLower($primary_keyword) THEN 1.0
+             WHEN toLower(n.name) CONTAINS toLower($query) THEN 0.9
+             ELSE 0.7
+         END as score
+    
+    RETURN {
+        id: n.id,
+        name: n.name,
+        type: labels(n)[0],
+        bcId: bc.id,
+        bcName: bc.name,
+        description: n.description,
+        similarity: score
+    } as result
+    ORDER BY score DESC
+    LIMIT $limit
+    """
+    
+    # Extract keywords from query
+    keywords = [w.strip() for w in request.query.split() if len(w.strip()) > 2]
+    if not keywords:
+        keywords = [request.query]
+    
+    with get_session() as session:
+        result = session.run(
+            query,
+            keywords=keywords,
+            primary_keyword=keywords[0] if keywords else "",
+            query=request.query,
+            nodeTypes=request.nodeTypes if request.nodeTypes else None,
+            excludeIds=request.excludeIds,
+            limit=request.limit
+        )
+        
+        results = []
+        seen_ids = set()
+        for record in result:
+            obj = record["result"]
+            if obj["id"] and obj["id"] not in seen_ids:
+                seen_ids.add(obj["id"])
+                results.append(VectorSearchResult(
+                    id=obj["id"],
+                    name=obj["name"],
+                    type=obj["type"],
+                    bcId=obj.get("bcId"),
+                    bcName=obj.get("bcName"),
+                    similarity=obj.get("similarity", 0.5),
+                    description=obj.get("description")
+                ))
+        
+        return results
+
+
+@router.get("/all-nodes")
+async def get_all_nodes() -> dict[str, List[dict[str, Any]]]:
+    """
+    Get all nodes grouped by type for frontend reference.
+    Useful for showing available connection targets.
+    """
+    query = """
+    MATCH (bc:BoundedContext)
+    OPTIONAL MATCH (bc)-[:HAS_AGGREGATE]->(agg:Aggregate)
+    OPTIONAL MATCH (agg)-[:HAS_COMMAND]->(cmd:Command)
+    OPTIONAL MATCH (cmd)-[:EMITS]->(evt:Event)
+    OPTIONAL MATCH (bc)-[:HAS_POLICY]->(pol:Policy)
+    
+    WITH bc, 
+         collect(DISTINCT agg {.id, .name, .rootEntity}) as aggregates,
+         collect(DISTINCT cmd {.id, .name, .actor}) as commands,
+         collect(DISTINCT evt {.id, .name, .version}) as events,
+         collect(DISTINCT pol {.id, .name, .triggerCondition}) as policies
+    
+    RETURN bc {.id, .name, .description,
+        aggregates: aggregates,
+        commands: commands,
+        events: events,
+        policies: policies
+    } as boundedContext
+    """
+    
+    with get_session() as session:
+        result = session.run(query)
+        bounded_contexts = []
+        for record in result:
+            bc = dict(record["boundedContext"])
+            bounded_contexts.append(bc)
+        
+        return {"boundedContexts": bounded_contexts}
 

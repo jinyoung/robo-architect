@@ -26,8 +26,15 @@ export const useChangeStore = defineStore('change', () => {
   // Impact analysis results
   const impactedNodes = ref([])
   
+  // Scope analysis from LangGraph workflow
+  const changeScope = ref(null) // 'local', 'cross_bc', 'new_capability'
+  const scopeReasoning = ref('')
+  const searchKeywords = ref([])
+  const relatedObjects = ref([]) // Objects found via vector search in other BCs
+  
   // Change plan from LLM
   const changePlan = ref([])
+  const planSummary = ref('')
   const planRevisions = ref([]) // History of plan revisions
   
   // Apply progress
@@ -76,18 +83,28 @@ export const useChangeStore = defineStore('change', () => {
       }
       
       const planData = await planResponse.json()
+      
+      // Extract scope analysis from LangGraph workflow
+      changeScope.value = planData.scope || 'local'
+      scopeReasoning.value = planData.scopeReasoning || ''
+      searchKeywords.value = planData.keywords || []
+      relatedObjects.value = planData.relatedObjects || []
       changePlan.value = planData.changes || []
+      planSummary.value = planData.summary || ''
       
       // Store in revision history
       planRevisions.value = [{
         timestamp: new Date().toISOString(),
         plan: changePlan.value,
-        feedback: null
+        feedback: null,
+        scope: changeScope.value
       }]
       
       return {
         impactedNodes: impactedNodes.value,
-        changePlan: changePlan.value
+        changePlan: changePlan.value,
+        changeScope: changeScope.value,
+        relatedObjects: relatedObjects.value
       }
     } catch (e) {
       error.value = e.message
@@ -123,13 +140,20 @@ export const useChangeStore = defineStore('change', () => {
       }
       
       const planData = await response.json()
+      
+      // Update with revised plan data
+      if (planData.scope) changeScope.value = planData.scope
+      if (planData.scopeReasoning) scopeReasoning.value = planData.scopeReasoning
+      if (planData.relatedObjects) relatedObjects.value = planData.relatedObjects
       changePlan.value = planData.changes || []
+      if (planData.summary) planSummary.value = planData.summary
       
       // Add to revision history
       planRevisions.value.push({
         timestamp: new Date().toISOString(),
         plan: changePlan.value,
-        feedback
+        feedback,
+        scope: changeScope.value
       })
       
       return changePlan.value
@@ -195,7 +219,12 @@ export const useChangeStore = defineStore('change', () => {
     originalUserStory.value = null
     editedUserStory.value = null
     impactedNodes.value = []
+    changeScope.value = null
+    scopeReasoning.value = ''
+    searchKeywords.value = []
+    relatedObjects.value = []
     changePlan.value = []
+    planSummary.value = ''
     planRevisions.value = []
     applyProgress.value = 0
     appliedChanges.value = []
@@ -210,7 +239,12 @@ export const useChangeStore = defineStore('change', () => {
     originalUserStory,
     editedUserStory,
     impactedNodes,
+    changeScope,
+    scopeReasoning,
+    searchKeywords,
+    relatedObjects,
     changePlan,
+    planSummary,
     planRevisions,
     applyProgress,
     appliedChanges,

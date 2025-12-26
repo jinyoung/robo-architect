@@ -157,6 +157,35 @@ function formatNodeType(type) {
   }
   return icons[type] || '•'
 }
+
+function getScopeLabel(scope) {
+  const labels = {
+    local: 'Local Change',
+    cross_bc: 'Cross-BC Connection',
+    new_capability: 'New Capability'
+  }
+  return labels[scope] || scope
+}
+
+function getScopeIcon(scope) {
+  const icons = {
+    local: '🔄',
+    cross_bc: '🔗',
+    new_capability: '✨'
+  }
+  return icons[scope] || '📋'
+}
+
+function getActionLabel(action) {
+  const labels = {
+    rename: 'RENAME',
+    update: 'UPDATE',
+    create: 'CREATE',
+    delete: 'DELETE',
+    connect: 'CONNECT'
+  }
+  return labels[action] || action.toUpperCase()
+}
 </script>
 
 <template>
@@ -248,6 +277,15 @@ function formatNodeType(type) {
             
             <!-- Step 3: Plan Review -->
             <div v-else-if="currentStep === 'plan'" class="plan-review">
+              <!-- Scope Analysis Banner -->
+              <div class="scope-banner" :class="`scope-banner--${changeStore.changeScope}`">
+                <div class="scope-banner__icon">{{ getScopeIcon(changeStore.changeScope) }}</div>
+                <div class="scope-banner__content">
+                  <div class="scope-banner__title">{{ getScopeLabel(changeStore.changeScope) }}</div>
+                  <div class="scope-banner__desc">{{ changeStore.scopeReasoning }}</div>
+                </div>
+              </div>
+              
               <!-- Impact Summary -->
               <div class="impact-summary">
                 <div class="impact-summary__header">
@@ -257,7 +295,11 @@ function formatNodeType(type) {
                 <div class="impact-stats">
                   <div class="impact-stat">
                     <span class="impact-stat__value">{{ changeStore.impactedNodes.length }}</span>
-                    <span class="impact-stat__label">Affected Objects</span>
+                    <span class="impact-stat__label">Connected Objects</span>
+                  </div>
+                  <div class="impact-stat" v-if="changeStore.relatedObjects.length > 0">
+                    <span class="impact-stat__value">{{ changeStore.relatedObjects.length }}</span>
+                    <span class="impact-stat__label">Related (Other BCs)</span>
                   </div>
                   <div class="impact-stat">
                     <span class="impact-stat__value">{{ changeStore.changePlan.length }}</span>
@@ -266,9 +308,9 @@ function formatNodeType(type) {
                 </div>
               </div>
               
-              <!-- Impacted Nodes -->
-              <div class="impacted-nodes">
-                <div class="section-title">Affected Objects</div>
+              <!-- Connected Nodes -->
+              <div class="impacted-nodes" v-if="changeStore.impactedNodes.length > 0">
+                <div class="section-title">Connected Objects (Same BC)</div>
                 <div class="node-list">
                   <div 
                     v-for="node in changeStore.impactedNodes" 
@@ -283,6 +325,29 @@ function formatNodeType(type) {
                 </div>
               </div>
               
+              <!-- Related Objects from Vector Search -->
+              <div class="related-objects" v-if="changeStore.relatedObjects.length > 0">
+                <div class="section-title">
+                  <span class="section-title__icon">🔍</span>
+                  Related Objects Found (Other BCs)
+                </div>
+                <div class="node-list">
+                  <div 
+                    v-for="obj in changeStore.relatedObjects" 
+                    :key="obj.id"
+                    class="node-item node-item--related"
+                    :class="`node-item--${obj.type?.toLowerCase()}`"
+                  >
+                    <span class="node-item__icon">{{ formatNodeType(obj.type) }}</span>
+                    <div class="node-item__info">
+                      <span class="node-item__name">{{ obj.name }}</span>
+                      <span class="node-item__bc">BC: {{ obj.bcName || 'Unknown' }}</span>
+                    </div>
+                    <span class="node-item__score">{{ Math.round(obj.similarity * 100) }}%</span>
+                  </div>
+                </div>
+              </div>
+              
               <!-- Change Plan -->
               <div class="change-plan">
                 <div class="section-title">Proposed Changes</div>
@@ -291,22 +356,30 @@ function formatNodeType(type) {
                     v-for="(change, idx) in changeStore.changePlan" 
                     :key="idx"
                     class="plan-item"
+                    :class="{ 'plan-item--connect': change.action === 'connect' }"
                   >
                     <div class="plan-item__header">
                       <span class="plan-item__number">{{ idx + 1 }}</span>
                       <span class="plan-item__type" :class="`plan-item__type--${change.action}`">
-                        {{ change.action }}
+                        {{ getActionLabel(change.action) }}
                       </span>
                       <span class="plan-item__target">{{ change.targetType }}: {{ change.targetName }}</span>
+                      <span v-if="change.targetBcName" class="plan-item__bc">
+                        {{ change.targetBcName }}
+                      </span>
                     </div>
                     <div class="plan-item__detail">
                       <template v-if="change.action === 'rename'">
-                        <span class="plan-from">{{ change.from }}</span>
+                        <span class="plan-from">{{ change.from_value }}</span>
                         <span class="plan-arrow">→</span>
-                        <span class="plan-to">{{ change.to }}</span>
+                        <span class="plan-to">{{ change.to_value }}</span>
                       </template>
-                      <template v-else-if="change.action === 'update'">
-                        {{ change.description }}
+                      <template v-else-if="change.action === 'connect'">
+                        <div class="connection-visual">
+                          <span class="connection-source">{{ change.sourceId }}</span>
+                          <span class="connection-type">{{ change.connectionType }}</span>
+                          <span class="connection-target">{{ change.targetName }}</span>
+                        </div>
                       </template>
                       <template v-else>
                         {{ change.description }}
@@ -764,6 +837,52 @@ function formatNodeType(type) {
   margin-bottom: var(--spacing-sm);
 }
 
+/* Scope Banner */
+.scope-banner {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--spacing-md);
+  padding: var(--spacing-md);
+  border-radius: var(--radius-md);
+  margin-bottom: var(--spacing-md);
+}
+
+.scope-banner--local {
+  background: rgba(32, 201, 151, 0.1);
+  border: 1px solid rgba(32, 201, 151, 0.3);
+}
+
+.scope-banner--cross_bc {
+  background: rgba(230, 119, 0, 0.1);
+  border: 1px solid rgba(230, 119, 0, 0.3);
+}
+
+.scope-banner--new_capability {
+  background: rgba(156, 39, 176, 0.1);
+  border: 1px solid rgba(156, 39, 176, 0.3);
+}
+
+.scope-banner__icon {
+  font-size: 1.5rem;
+  flex-shrink: 0;
+}
+
+.scope-banner__content {
+  flex: 1;
+}
+
+.scope-banner__title {
+  font-weight: 600;
+  color: var(--color-text-bright);
+  margin-bottom: 4px;
+}
+
+.scope-banner__desc {
+  font-size: 0.85rem;
+  color: var(--color-text);
+  line-height: 1.4;
+}
+
 /* Impacted Nodes */
 .node-list {
   display: flex;
@@ -779,6 +898,11 @@ function formatNodeType(type) {
   background: var(--color-bg);
   border-radius: var(--radius-sm);
   font-size: 0.85rem;
+}
+
+.node-item--related {
+  flex-direction: row;
+  padding: 8px 12px;
 }
 
 .node-item--aggregate { border-left: 3px solid var(--color-aggregate); }
@@ -799,6 +923,36 @@ function formatNodeType(type) {
 .node-item__name {
   font-weight: 500;
   color: var(--color-text-bright);
+}
+
+.node-item__info {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  flex: 1;
+}
+
+.node-item__bc {
+  font-size: 0.7rem;
+  color: var(--color-text-light);
+}
+
+.node-item__score {
+  font-size: 0.7rem;
+  padding: 2px 6px;
+  background: rgba(34, 139, 230, 0.2);
+  color: var(--color-accent);
+  border-radius: var(--radius-sm);
+  font-weight: 600;
+}
+
+/* Related Objects Section */
+.related-objects {
+  margin-top: var(--spacing-md);
+}
+
+.section-title__icon {
+  margin-right: var(--spacing-xs);
 }
 
 /* Change Plan */
@@ -863,6 +1017,25 @@ function formatNodeType(type) {
   color: #fa5252;
 }
 
+.plan-item__type--connect {
+  background: rgba(230, 119, 0, 0.2);
+  color: #e67700;
+}
+
+.plan-item--connect {
+  border: 1px solid rgba(230, 119, 0, 0.3);
+  background: linear-gradient(135deg, rgba(230, 119, 0, 0.05), transparent);
+}
+
+.plan-item__bc {
+  font-size: 0.7rem;
+  padding: 2px 8px;
+  background: var(--color-bg-tertiary);
+  border-radius: var(--radius-sm);
+  color: var(--color-text-light);
+  margin-left: auto;
+}
+
 .plan-item__target {
   font-size: 0.85rem;
   color: var(--color-text-bright);
@@ -888,6 +1061,34 @@ function formatNodeType(type) {
 .plan-to {
   color: #40c057;
   font-weight: 500;
+}
+
+/* Connection Visual */
+.connection-visual {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-sm);
+  padding: var(--spacing-xs) 0;
+}
+
+.connection-source {
+  font-family: var(--font-mono);
+  font-size: 0.8rem;
+  color: var(--color-text-light);
+}
+
+.connection-type {
+  padding: 2px 8px;
+  background: rgba(230, 119, 0, 0.2);
+  border-radius: var(--radius-sm);
+  font-size: 0.7rem;
+  font-weight: 600;
+  color: #e67700;
+}
+
+.connection-target {
+  font-weight: 500;
+  color: var(--color-text-bright);
 }
 
 .plan-item__reason {
