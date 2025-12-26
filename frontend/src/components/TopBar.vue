@@ -3,10 +3,12 @@ import { ref } from 'vue'
 import { useCanvasStore } from '../stores/canvas'
 import { useTerminologyStore } from '../stores/terminology'
 import IngestionModal from './IngestionModal.vue'
+import PRDGeneratorModal from './PRDGeneratorModal.vue'
 
 const canvasStore = useCanvasStore()
 const terminologyStore = useTerminologyStore()
 const showIngestionModal = ref(false)
+const showPRDModal = ref(false)
 
 function handleIngestionComplete() {
   // Modal will trigger navigator refresh
@@ -16,7 +18,7 @@ function handleIngestionComplete() {
 <template>
   <header class="top-bar">
     <div class="top-bar__logo">
-      <div class="top-bar__logo-icon"></div>
+      <div class="top-bar__logo-icon">RA</div>
       <span>Robo Architect</span>
     </div>
     
@@ -34,6 +36,24 @@ function handleIngestionComplete() {
         <line x1="12" y1="3" x2="12" y2="15"></line>
       </svg>
       <span>문서 업로드</span>
+    </button>
+    
+    <!-- PRD Generator Button -->
+    <button 
+      class="prd-btn"
+      :class="{ 'is-disabled': canvasStore.nodes.length === 0 }"
+      @click="showPRDModal = true"
+      :disabled="canvasStore.nodes.length === 0"
+      title="캔버스 모델에서 PRD 생성"
+    >
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+        <polyline points="14 2 14 8 20 8"/>
+        <line x1="16" y1="13" x2="8" y2="13"/>
+        <line x1="16" y1="17" x2="8" y2="17"/>
+        <polyline points="10 9 9 9 8 9"/>
+      </svg>
+      <span>PRD 생성</span>
     </button>
     
     <div class="top-bar__divider"></div>
@@ -82,6 +102,12 @@ function handleIngestionComplete() {
       v-model="showIngestionModal"
       @complete="handleIngestionComplete"
     />
+    
+    <!-- PRD Generator Modal -->
+    <PRDGeneratorModal 
+      :visible="showPRDModal"
+      @close="showPRDModal = false"
+    />
   </header>
 </template>
 
@@ -108,6 +134,37 @@ function handleIngestionComplete() {
 
 .upload-btn:active {
   transform: translateY(0);
+}
+
+/* PRD Generator Button */
+.prd-btn {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-sm);
+  padding: var(--spacing-sm) var(--spacing-md);
+  background: linear-gradient(135deg, #9333ea 0%, #7c3aed 100%);
+  border: none;
+  border-radius: var(--radius-md);
+  color: white;
+  font-size: 0.875rem;
+  font-weight: 500;
+  cursor: pointer;
+  transition: transform 0.15s, box-shadow 0.15s, opacity 0.15s;
+}
+
+.prd-btn:hover:not(:disabled) {
+  transform: translateY(-1px);
+  box-shadow: 0 4px 12px rgba(147, 51, 234, 0.4);
+}
+
+.prd-btn:active:not(:disabled) {
+  transform: translateY(0);
+}
+
+.prd-btn:disabled,
+.prd-btn.is-disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 
 /* Developer Mode Toggle */

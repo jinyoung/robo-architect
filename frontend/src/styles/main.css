@@ -118,6 +118,13 @@ body {
   height: 28px;
   background: linear-gradient(135deg, var(--color-command) 0%, var(--color-event) 100%);
   border-radius: var(--radius-sm);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 0.75rem;
+  font-weight: 700;
+  color: white;
+  letter-spacing: -0.5px;
 }
 
 .top-bar__divider {

@@ -66,6 +66,10 @@ app.include_router(change_router)
 from api.chat import router as chat_router
 app.include_router(chat_router)
 
+# Include PRD generator router
+from api.prd_generator import router as prd_router
+app.include_router(prd_router)
+
 
 def get_session():
     """Get a Neo4j session."""
