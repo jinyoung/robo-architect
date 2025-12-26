@@ -51,7 +51,8 @@ const nodeIcon = computed(() => {
       Aggregate: 'DB',
       Command: 'API',
       Event: 'E',
-      Policy: 'SVC'
+      Policy: 'SVC',
+      Property: '{ }'
     }
     return devIcons[props.node.type] || '?'
   }
@@ -61,7 +62,8 @@ const nodeIcon = computed(() => {
     Aggregate: 'A',
     Command: 'C',
     Event: 'E',
-    Policy: 'P'
+    Policy: 'P',
+    Property: '{ }'
   }
   return icons[props.node.type] || '?'
 })
@@ -72,6 +74,10 @@ const displayName = computed(() => {
     const role = props.node.role || 'user'
     const action = props.node.action || ''
     return `${role}: ${action.substring(0, 30)}${action.length > 30 ? '...' : ''}`
+  }
+  if (props.node.type === 'Property') {
+    const dataType = props.node.dataType || props.node.type || ''
+    return `${props.node.name}: ${dataType}`
   }
   return props.node.name
 })
@@ -102,6 +108,10 @@ const children = computed(() => {
   }
   
   if (type === 'Aggregate') {
+    const properties = (props.node.properties || []).map(p => ({
+      ...p,
+      type: 'Property'
+    }))
     const commands = (props.node.commands || []).map(c => ({
       ...c,
       type: 'Command'
@@ -110,13 +120,25 @@ const children = computed(() => {
       ...e,
       type: 'Event'
     }))
-    return [...commands, ...events]
+    return [...properties, ...commands, ...events]
   }
   
   if (type === 'Command') {
-    return (props.node.events || []).map(e => ({
+    const properties = (props.node.properties || []).map(p => ({
+      ...p,
+      type: 'Property'
+    }))
+    const events = (props.node.events || []).map(e => ({
       ...e,
       type: 'Event'
+    }))
+    return [...properties, ...events]
+  }
+  
+  if (type === 'Event') {
+    return (props.node.properties || []).map(p => ({
+      ...p,
+      type: 'Property'
     }))
   }
   

@@ -304,3 +304,89 @@ Please review and provide feedback:
 If approved, respond with "APPROVED".
 If changes needed, describe the changes."""
 
+# =============================================================================
+# Property Extraction Prompts
+# =============================================================================
+
+EXTRACT_AGGREGATE_PROPERTIES_PROMPT = """Identify the member fields (properties) for the Aggregate Root.
+
+Aggregate: {aggregate_name} (ID: {aggregate_id})
+Bounded Context: {bc_name}
+Root Entity: {root_entity}
+Description: {description}
+Invariants: {invariants}
+
+Related User Stories:
+{user_stories}
+
+Guidelines for identifying Aggregate Root properties:
+1. Include identity fields (e.g., orderId, customerId)
+2. Include state fields that enforce invariants
+3. Include value objects as nested types
+4. Include timestamps (createdAt, updatedAt) where appropriate
+5. Use appropriate data types (String, Integer, Long, Date, Money, List<T>, etc.)
+
+For each Property, provide:
+- A unique ID: PROP-AGGREGATE_ID-FIELDNAME (e.g., PROP-AGG-ORDER-ORDERID)
+- Field name in camelCase (e.g., orderId, totalAmount)
+- Data type (String, Integer, Long, Double, Date, Boolean, Money, List<ItemType>, etc.)
+- Whether it's required (true/false)
+- Brief description
+
+Output should be a list of PropertyCandidate objects."""
+
+EXTRACT_COMMAND_PROPERTIES_PROMPT = """Identify the request body fields (properties) for the Command.
+
+Command: {command_name} (ID: {command_id})
+Aggregate: {aggregate_name}
+Bounded Context: {bc_name}
+Actor: {actor}
+Description: {description}
+
+Related User Stories:
+{user_stories}
+
+Guidelines for identifying Command request body properties:
+1. Include all input parameters needed to execute this command
+2. Do NOT include identity fields that are in the URL path (e.g., orderId in /orders/{orderId}/cancel)
+3. Include payload data from the actor's input
+4. Use appropriate data types
+
+For each Property, provide:
+- A unique ID: PROP-COMMAND_ID-FIELDNAME (e.g., PROP-CMD-PLACE-ORDER-ITEMS)
+- Field name in camelCase (e.g., items, quantity, shippingAddress)
+- Data type (String, Integer, Long, Double, Date, Boolean, List<ItemType>, etc.)
+- Whether it's required (true/false)
+- Brief description
+
+Output should be a list of PropertyCandidate objects."""
+
+EXTRACT_EVENT_PROPERTIES_PROMPT = """Identify the payload attributes (properties) for the Event.
+
+Event: {event_name} (ID: {event_id})
+Aggregate: {aggregate_name}
+Bounded Context: {bc_name}
+Triggered by Command: {command_name}
+
+Command Request Properties:
+{command_properties}
+
+Aggregate Properties:
+{aggregate_properties}
+
+Guidelines for identifying Event payload properties:
+1. Include data that downstream consumers need
+2. Include the aggregate identity (e.g., orderId)
+3. Include relevant state changes that occurred
+4. Events should be self-contained - include enough context
+5. Include timestamp of when the event occurred
+
+For each Property, provide:
+- A unique ID: PROP-EVENT_ID-FIELDNAME (e.g., PROP-EVT-ORDER-PLACED-ORDERID)
+- Field name in camelCase (e.g., orderId, status, changedAt)
+- Data type (String, Integer, Long, Double, Date, Boolean, etc.)
+- Whether it's required (true/false)
+- Brief description
+
+Output should be a list of PropertyCandidate objects."""
+

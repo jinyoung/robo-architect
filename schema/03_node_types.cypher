@@ -184,3 +184,63 @@ CREATE (pol:Policy {
     condition: "OrderCancelled received",
     description: "주문 취소 이벤트 수신 시 환불 처리"
 });
+
+
+// ############################################################
+// 8. Property (속성/필드)
+// ############################################################
+// 설명: DDD 객체(Aggregate, Command, Event)의 멤버 필드
+// 관계:
+//   - HAS_PROPERTY ← Aggregate / Command / Event
+//
+// 필수 속성:
+//   - id: String
+//   - name: String (필드명)
+//   - type: String (데이터 타입)
+//
+// 선택 속성:
+//   - description: String
+//   - isRequired: Boolean
+//   - parentId: String (부모 객체 ID)
+//   - parentType: String ("Aggregate", "Command", "Event")
+// ############################################################
+
+CREATE (prop:Property {
+    id: "PROP-AGG-ORDER-ORDERID",
+    name: "orderId",
+    type: "String",
+    description: "주문 고유 식별자",
+    isRequired: true,
+    parentId: "AGG-ORDER",
+    parentType: "Aggregate"
+});
+
+CREATE (prop2:Property {
+    id: "PROP-AGG-ORDER-TOTALAMOUNT",
+    name: "totalAmount",
+    type: "Money",
+    description: "주문 총액",
+    isRequired: true,
+    parentId: "AGG-ORDER",
+    parentType: "Aggregate"
+});
+
+CREATE (prop3:Property {
+    id: "PROP-CMD-CANCEL-ORDER-REASON",
+    name: "reason",
+    type: "String",
+    description: "취소 사유",
+    isRequired: false,
+    parentId: "CMD-CANCEL-ORDER",
+    parentType: "Command"
+});
+
+CREATE (prop4:Property {
+    id: "PROP-EVT-ORDER-CANCELLED-CANCELLEDAT",
+    name: "cancelledAt",
+    type: "DateTime",
+    description: "취소 시각",
+    isRequired: true,
+    parentId: "EVT-ORDER-CANCELLED",
+    parentType: "Event"
+});

@@ -460,6 +460,65 @@ class Neo4jClient:
             return dict(result.single()["policy"])
 
     # =========================================================================
+    # Property Operations
+    # =========================================================================
+
+    def create_property(
+        self,
+        id: str,
+        name: str,
+        parent_id: str,
+        parent_type: str,
+        data_type: str = "String",
+        description: str | None = None,
+        is_required: bool = True,
+    ) -> dict[str, Any]:
+        """
+        Create a Property node and link it to a parent (Aggregate, Command, or Event).
+        
+        Uses HAS_PROPERTY relationship.
+        """
+        # Determine the label of the parent
+        parent_label = parent_type  # BoundedContext, Aggregate, Command, Event
+        
+        query = f"""
+        MATCH (parent:{parent_label} {{id: $parent_id}})
+        MERGE (prop:Property {{id: $id}})
+        SET prop.name = $name,
+            prop.type = $data_type,
+            prop.description = $description,
+            prop.isRequired = $is_required,
+            prop.parentId = $parent_id,
+            prop.parentType = $parent_type
+        MERGE (parent)-[:HAS_PROPERTY]->(prop)
+        RETURN prop {{.id, .name, .type, .description, .isRequired}} as property
+        """
+        with self.session() as session:
+            result = session.run(
+                query,
+                id=id,
+                name=name,
+                parent_id=parent_id,
+                data_type=data_type,
+                description=description,
+                is_required=is_required,
+                parent_type=parent_type,
+            )
+            record = result.single()
+            return dict(record["property"]) if record else {}
+
+    def get_properties_by_parent(self, parent_id: str) -> list[dict[str, Any]]:
+        """Fetch properties belonging to a parent node."""
+        query = """
+        MATCH (parent {id: $parent_id})-[:HAS_PROPERTY]->(prop:Property)
+        RETURN prop {.id, .name, .type, .description, .isRequired} as property
+        ORDER BY prop.name
+        """
+        with self.session() as session:
+            result = session.run(query, parent_id=parent_id)
+            return [dict(record["property"]) for record in result]
+
+    # =========================================================================
     # Graph Traversal & Analysis
     # =========================================================================
 

@@ -147,6 +147,33 @@ CREATE (bc1)-[:DEPENDS_ON {
 }]->(bc2);
 
 
+// ############################################################
+// 9. HAS_PROPERTY
+// ############################################################
+// 방향: Aggregate / Command / Event → Property
+// 의미: DDD 객체가 해당 속성을 가짐
+//       - Aggregate: Root Entity의 멤버 필드
+//       - Command: Request Body 속성
+//       - Event: Payload 속성
+// ############################################################
+
+MATCH (agg:Aggregate {id: "AGG-ORDER"})
+MATCH (prop:Property {id: "PROP-AGG-ORDER-ORDERID"})
+CREATE (agg)-[:HAS_PROPERTY]->(prop);
+
+MATCH (agg:Aggregate {id: "AGG-ORDER"})
+MATCH (prop:Property {id: "PROP-AGG-ORDER-TOTALAMOUNT"})
+CREATE (agg)-[:HAS_PROPERTY]->(prop);
+
+MATCH (cmd:Command {id: "CMD-CANCEL-ORDER"})
+MATCH (prop:Property {id: "PROP-CMD-CANCEL-ORDER-REASON"})
+CREATE (cmd)-[:HAS_PROPERTY]->(prop);
+
+MATCH (evt:Event {id: "EVT-ORDER-CANCELLED"})
+MATCH (prop:Property {id: "PROP-EVT-ORDER-CANCELLED-CANCELLEDAT"})
+CREATE (evt)-[:HAS_PROPERTY]->(prop);
+
+
 // ============================================================
 // Event Storming Flow 시각화
 // ============================================================

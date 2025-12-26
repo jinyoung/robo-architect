@@ -6,6 +6,9 @@ export const useCanvasStore = defineStore('canvas', () => {
   const nodes = ref([])
   const edges = ref([])
   
+  // Selected nodes for chat-based modification
+  const selectedNodeIds = ref(new Set())
+  
   // Track BC containers and their children
   const bcContainers = ref({}) // { bcId: { nodeIds: [], bounds: {} } }
   
@@ -46,6 +49,239 @@ export const useCanvasStore = defineStore('canvas', () => {
   
   // Get all node IDs currently on canvas
   const nodeIds = computed(() => nodes.value.map(n => n.id))
+  
+  // Get selected nodes (for chat-based modification)
+  const selectedNodes = computed(() => 
+    nodes.value.filter(n => selectedNodeIds.value.has(n.id))
+  )
+  
+  // Check if a node is selected
+  function isSelected(nodeId) {
+    return selectedNodeIds.value.has(nodeId)
+  }
+  
+  // Toggle node selection
+  function toggleNodeSelection(nodeId) {
+    if (selectedNodeIds.value.has(nodeId)) {
+      selectedNodeIds.value.delete(nodeId)
+    } else {
+      selectedNodeIds.value.add(nodeId)
+    }
+    // Trigger reactivity
+    selectedNodeIds.value = new Set(selectedNodeIds.value)
+  }
+  
+  // Select a single node (clear others)
+  function selectNode(nodeId) {
+    selectedNodeIds.value = new Set([nodeId])
+  }
+  
+  // Add node to selection
+  function addToSelection(nodeId) {
+    selectedNodeIds.value.add(nodeId)
+    selectedNodeIds.value = new Set(selectedNodeIds.value)
+  }
+  
+  // Remove node from selection
+  function removeFromSelection(nodeId) {
+    selectedNodeIds.value.delete(nodeId)
+    selectedNodeIds.value = new Set(selectedNodeIds.value)
+  }
+  
+  // Clear all selections
+  function clearSelection() {
+    selectedNodeIds.value = new Set()
+  }
+  
+  // Select multiple nodes
+  function selectNodes(nodeIdArray) {
+    selectedNodeIds.value = new Set(nodeIdArray)
+  }
+  
+  // Ensure a node is properly parented to a BC
+  function ensureNodeParenting(nodeId, bcId) {
+    const nodeIndex = nodes.value.findIndex(n => n.id === nodeId)
+    if (nodeIndex === -1) return false
+    
+    const node = nodes.value[nodeIndex]
+    
+    // Skip if already correctly parented
+    if (node.parentNode === bcId) return true
+    
+    // Update parenting
+    nodes.value[nodeIndex] = {
+      ...node,
+      parentNode: bcId,
+      extent: 'parent',
+      data: {
+        ...node.data,
+        bcId: bcId
+      }
+    }
+    
+    console.log(`Re-parented node ${nodeId} to BC ${bcId}`)
+    return true
+  }
+  
+  // Update a node's data after modification
+  function updateNodeData(nodeId, newData) {
+    const nodeIndex = nodes.value.findIndex(n => n.id === nodeId)
+    if (nodeIndex === -1) return false
+    
+    const node = nodes.value[nodeIndex]
+    nodes.value[nodeIndex] = {
+      ...node,
+      data: {
+        ...node.data,
+        ...newData,
+        label: newData.name || node.data?.label
+      }
+    }
+    // Trigger reactivity
+    nodes.value = [...nodes.value]
+    return true
+  }
+  
+  // Refresh a node from the server
+  async function refreshNode(nodeId) {
+    try {
+      const response = await fetch(`/api/chat/node/${nodeId}`)
+      if (!response.ok) return false
+      
+      const data = await response.json()
+      const nodeData = data.node
+      const bcData = data.boundedContext
+      
+      // Update node data
+      const updated = updateNodeData(nodeId, {
+        name: nodeData.name,
+        description: nodeData.description,
+        bcId: bcData?.id,
+        bcName: bcData?.name,
+        ...nodeData
+      })
+      
+      // Ensure node is properly parented to BC if needed
+      if (updated && bcData?.id) {
+        const nodeIndex = nodes.value.findIndex(n => n.id === nodeId)
+        if (nodeIndex !== -1 && !nodes.value[nodeIndex].parentNode) {
+          // Check if BC is on canvas
+          if (isOnCanvas(bcData.id)) {
+            nodes.value[nodeIndex].parentNode = bcData.id
+            nodes.value[nodeIndex].extent = 'parent'
+            nodes.value = [...nodes.value]
+          }
+        }
+      }
+      
+      return updated
+    } catch (error) {
+      console.error('Failed to refresh node:', error)
+      return false
+    }
+  }
+  
+  // Refresh multiple nodes
+  async function refreshNodes(nodeIdArray) {
+    const results = await Promise.all(
+      nodeIdArray.map(id => refreshNode(id))
+    )
+    return results.every(r => r)
+  }
+  
+  // Add a new node to an existing BC on canvas
+  function addNodeToBC(nodeData, bcId) {
+    if (isOnCanvas(nodeData.id)) {
+      console.log('Node already on canvas:', nodeData.id)
+      return null
+    }
+    
+    // Ensure BC exists
+    const bcNode = nodes.value.find(n => n.id === bcId && n.type === 'boundedcontext')
+    if (!bcNode) {
+      console.warn('BC not on canvas:', bcId)
+      return null
+    }
+    
+    // Calculate position within BC
+    const position = calculatePositionInBC(bcId, nodeData.type, 0)
+    
+    const node = {
+      id: nodeData.id,
+      type: nodeData.type.toLowerCase(),
+      position,
+      data: {
+        ...nodeData,
+        label: nodeData.name,
+        bcId: bcId
+      },
+      parentNode: bcId,
+      extent: 'parent'
+    }
+    
+    nodes.value.push(node)
+    
+    // Update BC size if not collapsed
+    if (!collapsedBCs.value[bcId]) {
+      updateBCSize(bcId)
+    }
+    
+    // Trigger reactivity
+    nodes.value = [...nodes.value]
+    
+    return node
+  }
+  
+  // Sync canvas with server after changes
+  async function syncAfterChanges(changes) {
+    for (const change of changes) {
+      const { action, targetId, targetType, targetName, targetBcId } = change
+      
+      if (action === 'rename' || action === 'update') {
+        // Update the node data on canvas while preserving structure
+        const nodeIndex = nodes.value.findIndex(n => n.id === targetId)
+        if (nodeIndex !== -1) {
+          const existingNode = nodes.value[nodeIndex]
+          nodes.value[nodeIndex] = {
+            ...existingNode,
+            data: {
+              ...existingNode.data,
+              name: targetName || existingNode.data?.name,
+              label: targetName || existingNode.data?.label,
+              description: change.description || existingNode.data?.description
+            }
+          }
+          // Trigger reactivity
+          nodes.value = [...nodes.value]
+        } else {
+          console.log('Node not on canvas for update:', targetId)
+        }
+      } else if (action === 'create') {
+        // Add new node to canvas if its BC is on canvas
+        const bcId = targetBcId || change.bcId
+        if (bcId && isOnCanvas(bcId)) {
+          addNodeToBC({
+            id: targetId,
+            name: targetName,
+            type: targetType,
+            description: change.description,
+            bcId: bcId
+          }, bcId)
+        } else if (bcId) {
+          console.log('BC not on canvas, skipping node creation:', bcId, targetId)
+        }
+      } else if (action === 'delete') {
+        // Remove node from canvas
+        removeNode(targetId)
+      } else if (action === 'connect') {
+        // Add edge if both nodes are on canvas
+        const sourceId = change.sourceId
+        if (isOnCanvas(sourceId) && isOnCanvas(targetId)) {
+          addEdge(sourceId, targetId, change.connectionType || 'TRIGGERS')
+        }
+      }
+    }
+  }
   
   // Check if a node is on canvas
   function isOnCanvas(nodeId) {
@@ -368,19 +604,23 @@ export const useCanvasStore = defineStore('canvas', () => {
         // Layout Commands (left column) - track positions for policy placement
         const commandPositions = {}
         typeGroups.Command.forEach((cmd, idx) => {
+          const yPos = currentY + idx * (nodeHeight + gapY)
+          commandPositions[cmd.id] = { x: commandX, y: yPos }
+          
           if (!isOnCanvas(cmd.id)) {
-            const yPos = currentY + idx * (nodeHeight + gapY)
-            commandPositions[cmd.id] = { x: commandX, y: yPos }
             const node = {
               id: cmd.id,
               type: 'command',
               position: { x: commandX, y: yPos },
-              data: { ...cmd, label: cmd.name },
+              data: { ...cmd, label: cmd.name, bcId: bcId },
               parentNode: bcId,
               extent: 'parent'
             }
             nodes.value.push(node)
             newNodes.push(node)
+          } else {
+            // Node already on canvas - ensure it's properly parented to this BC
+            ensureNodeParenting(cmd.id, bcId)
           }
         })
         
@@ -393,12 +633,14 @@ export const useCanvasStore = defineStore('canvas', () => {
               id: agg.id,
               type: 'aggregate',
               position: { x: aggregateX, y: aggStartY + idx * (nodeHeight + gapY) },
-              data: { ...agg, label: agg.name },
+              data: { ...agg, label: agg.name, bcId: bcId },
               parentNode: bcId,
               extent: 'parent'
             }
             nodes.value.push(node)
             newNodes.push(node)
+          } else {
+            ensureNodeParenting(agg.id, bcId)
           }
         })
         
@@ -409,12 +651,14 @@ export const useCanvasStore = defineStore('canvas', () => {
               id: evt.id,
               type: 'event',
               position: { x: eventX, y: currentY + idx * (nodeHeight + gapY) },
-              data: { ...evt, label: evt.name },
+              data: { ...evt, label: evt.name, bcId: bcId },
               parentNode: bcId,
               extent: 'parent'
             }
             nodes.value.push(node)
             newNodes.push(node)
+          } else {
+            ensureNodeParenting(evt.id, bcId)
           }
         })
         
@@ -443,12 +687,14 @@ export const useCanvasStore = defineStore('canvas', () => {
               id: pol.id,
               type: 'policy',
               position: { x: policyX, y: yPos },
-              data: { ...pol, label: pol.name },
+              data: { ...pol, label: pol.name, bcId: bcId },
               parentNode: bcId,
               extent: 'parent'
             }
             nodes.value.push(node)
             newNodes.push(node)
+          } else {
+            ensureNodeParenting(pol.id, bcId)
           }
         })
         
@@ -1112,7 +1358,22 @@ export const useCanvasStore = defineStore('canvas', () => {
     bcContainers,
     collapsedBCs,
     bcLevelEdges,
+    selectedNodeIds,
+    selectedNodes,
     isOnCanvas,
+    isSelected,
+    toggleNodeSelection,
+    selectNode,
+    addToSelection,
+    removeFromSelection,
+    clearSelection,
+    selectNodes,
+    ensureNodeParenting,
+    updateNodeData,
+    refreshNode,
+    refreshNodes,
+    addNodeToBC,
+    syncAfterChanges,
     addNode,
     addNodesWithLayout,
     addEdge,

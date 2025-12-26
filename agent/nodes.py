@@ -38,6 +38,7 @@ from agent.state import (
     EventCandidate,
     EventStormingState,
     PolicyCandidate,
+    PropertyCandidate,
     UserStoryBreakdown,
     WorkflowPhase,
     format_user_story,
@@ -77,6 +78,13 @@ class PolicyList(BaseModel):
     """List of Policy candidates."""
     policies: List[PolicyCandidate] = Field(
         description="List of identified policies"
+    )
+
+
+class PropertyList(BaseModel):
+    """List of Property candidates."""
+    properties: List[PropertyCandidate] = Field(
+        description="List of properties/fields for the object"
     )
 
 load_dotenv()

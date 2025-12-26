@@ -27,6 +27,10 @@
   --color-userstory-light: #38d9a9;
   --color-userstory-dark: #12b886;
   
+  --color-property: #868e96;
+  --color-property-light: #adb5bd;
+  --color-property-dark: #495057;
+  
   /* UI Colors */
   --color-bg: #1a1b1e;
   --color-bg-secondary: #25262b;
@@ -254,6 +258,11 @@ body {
 
 .tree-node__icon--policy {
   background: var(--color-policy);
+}
+
+.tree-node__icon--property {
+  background: #868e96;
+  font-size: 0.5rem;
 }
 
 .tree-node__label {
@@ -625,4 +634,106 @@ body {
 .legend__color--event { background: var(--color-event); }
 .legend__color--aggregate { background: var(--color-aggregate); }
 .legend__color--policy { background: var(--color-policy); }
+
+/* ============================================
+   Right Panel Container (Canvas + Chat)
+   ============================================ */
+
+.right-panel-container {
+  flex: 1;
+  display: flex;
+  overflow: hidden;
+}
+
+/* ============================================
+   Node Selection Styling
+   ============================================ */
+
+.vue-flow__node.es-node--selected {
+  outline: 3px solid var(--color-accent) !important;
+  outline-offset: 3px !important;
+  box-shadow: 0 0 20px rgba(34, 139, 230, 0.4) !important;
+  animation: pulse-selection 2s infinite;
+}
+
+@keyframes pulse-selection {
+  0%, 100% {
+    box-shadow: 0 0 20px rgba(34, 139, 230, 0.4);
+  }
+  50% {
+    box-shadow: 0 0 30px rgba(34, 139, 230, 0.6);
+  }
+}
+
+/* Selection Badge */
+.selection-badge {
+  position: absolute;
+  top: var(--spacing-md);
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-sm);
+  padding: var(--spacing-xs) var(--spacing-md);
+  background: linear-gradient(135deg, var(--color-accent) 0%, #7c3aed 100%);
+  color: white;
+  border-radius: 20px;
+  font-size: 0.8rem;
+  font-weight: 500;
+  box-shadow: var(--shadow-lg);
+  z-index: 10;
+  animation: slideDownFade 0.3s ease;
+}
+
+@keyframes slideDownFade {
+  from {
+    opacity: 0;
+    transform: translateX(-50%) translateY(-10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(-50%) translateY(0);
+  }
+}
+
+.selection-badge__clear {
+  background: rgba(255, 255, 255, 0.2);
+  border: none;
+  color: white;
+  width: 18px;
+  height: 18px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  cursor: pointer;
+  transition: background 0.15s ease;
+}
+
+.selection-badge__clear:hover {
+  background: rgba(255, 255, 255, 0.3);
+}
+
+/* ============================================
+   Chat Panel Wrapper
+   ============================================ */
+
+.chat-panel-wrapper {
+  flex-shrink: 0;
+  height: 100%;
+  overflow: hidden;
+  animation: slideInFromRight 0.3s ease;
+  border-left: 1px solid var(--color-border);
+}
+
+@keyframes slideInFromRight {
+  from {
+    opacity: 0;
+    transform: translateX(20px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
 

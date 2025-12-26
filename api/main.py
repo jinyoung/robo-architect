@@ -62,6 +62,10 @@ app.include_router(ingestion_router)
 from api.change import router as change_router
 app.include_router(change_router)
 
+# Include chat-based modification router
+from api.chat import router as chat_router
+app.include_router(chat_router)
+
 
 def get_session():
     """Get a Neo4j session."""
@@ -373,6 +377,19 @@ async def get_context_full_tree(context_id: str) -> dict[str, Any]:
     ORDER BY pol.name
     """
     
+    # Get Properties for all objects in this BC
+    prop_query = """
+    MATCH (bc:BoundedContext {id: $context_id})-[:HAS_AGGREGATE]->(agg:Aggregate)
+    OPTIONAL MATCH (agg)-[:HAS_PROPERTY]->(aggProp:Property)
+    OPTIONAL MATCH (agg)-[:HAS_COMMAND]->(cmd:Command)-[:HAS_PROPERTY]->(cmdProp:Property)
+    OPTIONAL MATCH (agg)-[:HAS_COMMAND]->(cmd2:Command)-[:EMITS]->(evt:Event)-[:HAS_PROPERTY]->(evtProp:Property)
+    WITH 
+        COLLECT(DISTINCT {parentId: agg.id, parentType: 'Aggregate', prop: aggProp {.id, .name, .type, .description, .isRequired}}) as aggProps,
+        COLLECT(DISTINCT {parentId: cmd.id, parentType: 'Command', prop: cmdProp {.id, .name, .type, .description, .isRequired}}) as cmdProps,
+        COLLECT(DISTINCT {parentId: evt.id, parentType: 'Event', prop: evtProp {.id, .name, .type, .description, .isRequired}}) as evtProps
+    RETURN aggProps + cmdProps + evtProps as allProperties
+    """
+    
     with get_session() as session:
         # BC
         bc_result = session.run(bc_query, context_id=context_id)
@@ -434,6 +451,29 @@ async def get_context_full_tree(context_id: str) -> dict[str, Any]:
             pol["triggerEventId"] = record["triggerEventId"]
             pol["invokeCommandId"] = record["invokeCommandId"]
             policies.append(pol)
+        
+        # Properties - organize by parent
+        prop_result = session.run(prop_query, context_id=context_id)
+        properties_by_parent = {}
+        prop_record = prop_result.single()
+        if prop_record and prop_record["allProperties"]:
+            for item in prop_record["allProperties"]:
+                if item.get("prop") and item["prop"].get("id"):
+                    parent_id = item["parentId"]
+                    prop = dict(item["prop"])
+                    prop["type"] = "Property"
+                    prop["parentType"] = item["parentType"]
+                    if parent_id not in properties_by_parent:
+                        properties_by_parent[parent_id] = []
+                    properties_by_parent[parent_id].append(prop)
+        
+        # Add properties to aggregates, commands, and events
+        for agg_id, agg in aggregates.items():
+            agg["properties"] = properties_by_parent.get(agg_id, [])
+            for cmd in agg.get("commands", []):
+                cmd["properties"] = properties_by_parent.get(cmd["id"], [])
+            for evt in agg.get("events", []):
+                evt["properties"] = properties_by_parent.get(evt["id"], [])
         
         bc["userStories"] = user_stories
         bc["aggregates"] = list(aggregates.values())

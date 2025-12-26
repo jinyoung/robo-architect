@@ -308,6 +308,96 @@ export const useNavigatorStore = defineStore('navigator', () => {
     }
   }
   
+  // Dynamically add a Property to an object (Aggregate, Command, Event)
+  function addProperty(propertyData) {
+    const parentId = propertyData.parentId
+    const parentType = propertyData.parentType
+    
+    // Find the parent object in the trees
+    for (const bcId in contextTrees.value) {
+      const tree = contextTrees.value[bcId]
+      
+      for (const aggregate of (tree.aggregates || [])) {
+        // Check if parent is this aggregate
+        if (parentType === 'Aggregate' && aggregate.id === parentId) {
+          if (!aggregate.properties) aggregate.properties = []
+          const exists = aggregate.properties.some(p => p.id === propertyData.id)
+          if (!exists) {
+            aggregate.properties.push({
+              id: propertyData.id,
+              name: propertyData.name,
+              type: 'Property',
+              dataType: propertyData.dataType
+            })
+            contextTrees.value = { ...contextTrees.value }
+            markAsNew(propertyData.id)
+          }
+          return
+        }
+        
+        // Check if parent is a command
+        if (parentType === 'Command') {
+          const command = aggregate.commands?.find(c => c.id === parentId)
+          if (command) {
+            if (!command.properties) command.properties = []
+            const exists = command.properties.some(p => p.id === propertyData.id)
+            if (!exists) {
+              command.properties.push({
+                id: propertyData.id,
+                name: propertyData.name,
+                type: 'Property',
+                dataType: propertyData.dataType
+              })
+              contextTrees.value = { ...contextTrees.value }
+              markAsNew(propertyData.id)
+            }
+            return
+          }
+        }
+        
+        // Check if parent is an event
+        if (parentType === 'Event') {
+          const event = aggregate.events?.find(e => e.id === parentId)
+          if (event) {
+            if (!event.properties) event.properties = []
+            const exists = event.properties.some(p => p.id === propertyData.id)
+            if (!exists) {
+              event.properties.push({
+                id: propertyData.id,
+                name: propertyData.name,
+                type: 'Property',
+                dataType: propertyData.dataType
+              })
+              contextTrees.value = { ...contextTrees.value }
+              markAsNew(propertyData.id)
+            }
+            return
+          }
+          
+          // Also check events nested under commands
+          for (const cmd of (aggregate.commands || [])) {
+            const cmdEvent = cmd.events?.find(e => e.id === parentId)
+            if (cmdEvent) {
+              if (!cmdEvent.properties) cmdEvent.properties = []
+              const exists = cmdEvent.properties.some(p => p.id === propertyData.id)
+              if (!exists) {
+                cmdEvent.properties.push({
+                  id: propertyData.id,
+                  name: propertyData.name,
+                  type: 'Property',
+                  dataType: propertyData.dataType
+                })
+                contextTrees.value = { ...contextTrees.value }
+                markAsNew(propertyData.id)
+              }
+              return
+            }
+          }
+        }
+      }
+    }
+  }
+  
   // Generic add item to tree (legacy, for backwards compatibility)
   function addItemToTree(contextId, item) {
     markAsNew(item.id)
@@ -414,6 +504,7 @@ export const useNavigatorStore = defineStore('navigator', () => {
     addCommand,
     addEvent,
     addPolicy,
+    addProperty,
     addItemToTree,
     isNewlyAdded,
     refreshAll,

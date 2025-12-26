@@ -42,7 +42,9 @@ class IngestionPhase(str, Enum):
     EXTRACTING_COMMANDS = "extracting_commands"
     EXTRACTING_EVENTS = "extracting_events"
     IDENTIFYING_POLICIES = "identifying_policies"
+    GENERATING_PROPERTIES = "generating_properties"
     SAVING = "saving"
+    PAUSED = "paused"
     COMPLETE = "complete"
     ERROR = "error"
 
@@ -80,6 +82,7 @@ class IngestionSession:
     created_objects: list[CreatedObject] = field(default_factory=list)
     error: Optional[str] = None
     content: str = ""
+    is_paused: bool = False  # Pause state
 
 
 # Active sessions
@@ -103,6 +106,20 @@ def add_event(session: IngestionSession, event: ProgressEvent):
     session.status = event.phase
     session.progress = event.progress
     session.message = event.message
+
+
+async def wait_if_paused(session: IngestionSession) -> bool:
+    """
+    Check if session is paused and wait until resumed.
+    Returns True if was paused, False otherwise.
+    """
+    if not session.is_paused:
+        return False
+    
+    while session.is_paused:
+        await asyncio.sleep(0.5)  # Check every 500ms
+    
+    return True
 
 
 # =============================================================================
@@ -288,6 +305,15 @@ async def run_ingestion_workflow(
             }
         )
         
+        # Check for pause after User Story extraction
+        if session.is_paused:
+            yield ProgressEvent(
+                phase=IngestionPhase.PAUSED,
+                message="⏸️ 일시 정지됨 - User Story 추출 완료",
+                progress=20
+            )
+            await wait_if_paused(session)
+        
         # Phase 3: Identify Bounded Contexts
         yield ProgressEvent(
             phase=IngestionPhase.IDENTIFYING_BC,
@@ -366,6 +392,15 @@ async def run_ingestion_workflow(
                 except Exception:
                     pass
         
+        # Check for pause after BC identification
+        if session.is_paused:
+            yield ProgressEvent(
+                phase=IngestionPhase.PAUSED,
+                message="⏸️ 일시 정지됨 - BC 식별 완료",
+                progress=40
+            )
+            await wait_if_paused(session)
+        
         # Phase 4: Extract Aggregates
         yield ProgressEvent(
             phase=IngestionPhase.EXTRACTING_AGGREGATES,
@@ -427,6 +462,15 @@ async def run_ingestion_workflow(
                     }
                 )
                 await asyncio.sleep(0.15)
+        
+        # Check for pause after Aggregate extraction
+        if session.is_paused:
+            yield ProgressEvent(
+                phase=IngestionPhase.PAUSED,
+                message="⏸️ 일시 정지됨 - Aggregate 추출 완료",
+                progress=55
+            )
+            await wait_if_paused(session)
         
         # Phase 5: Extract Commands
         yield ProgressEvent(
@@ -494,6 +538,15 @@ async def run_ingestion_workflow(
                         }
                     )
                     await asyncio.sleep(0.1)
+        
+        # Check for pause after Command extraction
+        if session.is_paused:
+            yield ProgressEvent(
+                phase=IngestionPhase.PAUSED,
+                message="⏸️ 일시 정지됨 - Command 추출 완료",
+                progress=65
+            )
+            await wait_if_paused(session)
         
         # Phase 6: Extract Events
         yield ProgressEvent(
@@ -566,6 +619,15 @@ async def run_ingestion_workflow(
                             }
                         )
                         await asyncio.sleep(0.1)
+        
+        # Check for pause after Event extraction
+        if session.is_paused:
+            yield ProgressEvent(
+                phase=IngestionPhase.PAUSED,
+                message="⏸️ 일시 정지됨 - Event 추출 완료",
+                progress=75
+            )
+            await wait_if_paused(session)
         
         # Phase 7: Identify Policies
         yield ProgressEvent(
@@ -654,7 +716,7 @@ async def run_ingestion_workflow(
                     yield ProgressEvent(
                         phase=IngestionPhase.IDENTIFYING_POLICIES,
                         message=f"Policy 생성: {pol.name}",
-                        progress=95,
+                        progress=90,
                         data={
                             "type": "Policy",
                             "object": {
@@ -668,6 +730,262 @@ async def run_ingestion_workflow(
                 except Exception:
                     pass
         
+        # Check for pause after Policy identification
+        if session.is_paused:
+            yield ProgressEvent(
+                phase=IngestionPhase.PAUSED,
+                message="⏸️ 일시 정지됨 - Policy 식별 완료",
+                progress=85
+            )
+            await wait_if_paused(session)
+        
+        # Phase 8: Generate Properties for Aggregates, Commands, and Events
+        yield ProgressEvent(
+            phase=IngestionPhase.GENERATING_PROPERTIES,
+            message="속성(Property) 생성 중...",
+            progress=91
+        )
+        
+        from agent.nodes import PropertyList
+        from agent.prompts import (
+            EXTRACT_AGGREGATE_PROPERTIES_PROMPT,
+            EXTRACT_COMMAND_PROPERTIES_PROMPT,
+            EXTRACT_EVENT_PROPERTIES_PROMPT,
+        )
+        from agent.state import PropertyCandidate
+        
+        all_properties = {}
+        property_count = 0
+        
+        # 8.1: Generate properties for each Aggregate (Aggregate Root member fields)
+        for bc in bc_candidates:
+            bc_aggregates = all_aggregates.get(bc.id, [])
+            bc_stories = [us for us in user_stories if us.id in bc.user_story_ids]
+            stories_text = "\n".join([
+                f"- [{us.id}] {us.role}: {us.action}"
+                for us in bc_stories
+            ])
+            
+            for agg in bc_aggregates:
+                yield ProgressEvent(
+                    phase=IngestionPhase.GENERATING_PROPERTIES,
+                    message=f"Aggregate {agg.name} 속성 생성 중...",
+                    progress=92
+                )
+                
+                prompt = EXTRACT_AGGREGATE_PROPERTIES_PROMPT.format(
+                    aggregate_name=agg.name,
+                    aggregate_id=agg.id,
+                    bc_name=bc.name,
+                    root_entity=agg.root_entity,
+                    description=agg.description if hasattr(agg, 'description') else "",
+                    invariants=", ".join(agg.invariants) if agg.invariants else "None",
+                    user_stories=stories_text
+                )
+                
+                structured_llm = llm.with_structured_output(PropertyList)
+                
+                try:
+                    prop_response = structured_llm.invoke([
+                        SystemMessage(content=SYSTEM_PROMPT),
+                        HumanMessage(content=prompt)
+                    ])
+                    agg_properties = prop_response.properties
+                except Exception:
+                    agg_properties = []
+                
+                all_properties[agg.id] = agg_properties
+                
+                for prop in agg_properties:
+                    try:
+                        client.create_property(
+                            id=prop.id,
+                            name=prop.name,
+                            parent_id=agg.id,
+                            parent_type="Aggregate",
+                            data_type=prop.type,
+                            description=prop.description if hasattr(prop, 'description') else "",
+                            is_required=prop.is_required if hasattr(prop, 'is_required') else True
+                        )
+                        property_count += 1
+                        
+                        yield ProgressEvent(
+                            phase=IngestionPhase.GENERATING_PROPERTIES,
+                            message=f"Property 생성: {agg.name}.{prop.name}",
+                            progress=93,
+                            data={
+                                "type": "Property",
+                                "object": {
+                                    "id": prop.id,
+                                    "name": prop.name,
+                                    "type": "Property",
+                                    "dataType": prop.type,
+                                    "parentId": agg.id,
+                                    "parentType": "Aggregate"
+                                }
+                            }
+                        )
+                        await asyncio.sleep(0.05)
+                    except Exception:
+                        pass
+        
+        # 8.2: Generate properties for each Command (request body)
+        for bc in bc_candidates:
+            bc_aggregates = all_aggregates.get(bc.id, [])
+            bc_stories = [us for us in user_stories if us.id in bc.user_story_ids]
+            stories_text = "\n".join([
+                f"- [{us.id}] {us.role}: {us.action}"
+                for us in bc_stories
+            ])
+            
+            for agg in bc_aggregates:
+                commands = all_commands.get(agg.id, [])
+                
+                for cmd in commands:
+                    yield ProgressEvent(
+                        phase=IngestionPhase.GENERATING_PROPERTIES,
+                        message=f"Command {cmd.name} 속성 생성 중...",
+                        progress=95
+                    )
+                    
+                    prompt = EXTRACT_COMMAND_PROPERTIES_PROMPT.format(
+                        command_name=cmd.name,
+                        command_id=cmd.id,
+                        aggregate_name=agg.name,
+                        bc_name=bc.name,
+                        actor=cmd.actor if hasattr(cmd, 'actor') else "user",
+                        description=cmd.description if hasattr(cmd, 'description') else "",
+                        user_stories=stories_text
+                    )
+                    
+                    structured_llm = llm.with_structured_output(PropertyList)
+                    
+                    try:
+                        prop_response = structured_llm.invoke([
+                            SystemMessage(content=SYSTEM_PROMPT),
+                            HumanMessage(content=prompt)
+                        ])
+                        cmd_properties = prop_response.properties
+                    except Exception:
+                        cmd_properties = []
+                    
+                    all_properties[cmd.id] = cmd_properties
+                    
+                    for prop in cmd_properties:
+                        try:
+                            client.create_property(
+                                id=prop.id,
+                                name=prop.name,
+                                parent_id=cmd.id,
+                                parent_type="Command",
+                                data_type=prop.type,
+                                description=prop.description if hasattr(prop, 'description') else "",
+                                is_required=prop.is_required if hasattr(prop, 'is_required') else True
+                            )
+                            property_count += 1
+                            
+                            yield ProgressEvent(
+                                phase=IngestionPhase.GENERATING_PROPERTIES,
+                                message=f"Property 생성: {cmd.name}.{prop.name}",
+                                progress=96,
+                                data={
+                                    "type": "Property",
+                                    "object": {
+                                        "id": prop.id,
+                                        "name": prop.name,
+                                        "type": "Property",
+                                        "dataType": prop.type,
+                                        "parentId": cmd.id,
+                                        "parentType": "Command"
+                                    }
+                                }
+                            )
+                            await asyncio.sleep(0.03)
+                        except Exception:
+                            pass
+        
+        # 8.3: Generate properties for each Event (event payload)
+        for bc in bc_candidates:
+            bc_aggregates = all_aggregates.get(bc.id, [])
+            
+            for agg in bc_aggregates:
+                commands = all_commands.get(agg.id, [])
+                events = all_events.get(agg.id, [])
+                agg_props = all_properties.get(agg.id, [])
+                agg_props_text = "\n".join([
+                    f"- {p.name}: {p.type}" for p in agg_props
+                ]) if agg_props else "None"
+                
+                for i, evt in enumerate(events):
+                    cmd = commands[i] if i < len(commands) else (commands[0] if commands else None)
+                    cmd_name = cmd.name if cmd else "Unknown"
+                    cmd_props = all_properties.get(cmd.id, []) if cmd else []
+                    cmd_props_text = "\n".join([
+                        f"- {p.name}: {p.type}" for p in cmd_props
+                    ]) if cmd_props else "None"
+                    
+                    yield ProgressEvent(
+                        phase=IngestionPhase.GENERATING_PROPERTIES,
+                        message=f"Event {evt.name} 속성 생성 중...",
+                        progress=98
+                    )
+                    
+                    prompt = EXTRACT_EVENT_PROPERTIES_PROMPT.format(
+                        event_name=evt.name,
+                        event_id=evt.id,
+                        aggregate_name=agg.name,
+                        bc_name=bc.name,
+                        command_name=cmd_name,
+                        command_properties=cmd_props_text,
+                        aggregate_properties=agg_props_text
+                    )
+                    
+                    structured_llm = llm.with_structured_output(PropertyList)
+                    
+                    try:
+                        prop_response = structured_llm.invoke([
+                            SystemMessage(content=SYSTEM_PROMPT),
+                            HumanMessage(content=prompt)
+                        ])
+                        evt_properties = prop_response.properties
+                    except Exception:
+                        evt_properties = []
+                    
+                    all_properties[evt.id] = evt_properties
+                    
+                    for prop in evt_properties:
+                        try:
+                            client.create_property(
+                                id=prop.id,
+                                name=prop.name,
+                                parent_id=evt.id,
+                                parent_type="Event",
+                                data_type=prop.type,
+                                description=prop.description if hasattr(prop, 'description') else "",
+                                is_required=prop.is_required if hasattr(prop, 'is_required') else True
+                            )
+                            property_count += 1
+                            
+                            yield ProgressEvent(
+                                phase=IngestionPhase.GENERATING_PROPERTIES,
+                                message=f"Property 생성: {evt.name}.{prop.name}",
+                                progress=99,
+                                data={
+                                    "type": "Property",
+                                    "object": {
+                                        "id": prop.id,
+                                        "name": prop.name,
+                                        "type": "Property",
+                                        "dataType": prop.type,
+                                        "parentId": evt.id,
+                                        "parentType": "Event"
+                                    }
+                                }
+                            )
+                            await asyncio.sleep(0.03)
+                        except Exception:
+                            pass
+        
         # Complete
         yield ProgressEvent(
             phase=IngestionPhase.COMPLETE,
@@ -680,7 +998,8 @@ async def run_ingestion_workflow(
                     "aggregates": sum(len(aggs) for aggs in all_aggregates.values()),
                     "commands": sum(len(cmds) for cmds in all_commands.values()),
                     "events": sum(len(evts) for evts in all_events.values()),
-                    "policies": len(policies)
+                    "policies": len(policies),
+                    "properties": property_count
                 }
             }
         )
@@ -773,6 +1092,74 @@ async def stream_progress(session_id: str):
             del _sessions[session_id]
     
     return EventSourceResponse(event_generator())
+
+
+@router.post("/{session_id}/pause")
+async def pause_ingestion(session_id: str) -> dict[str, Any]:
+    """
+    Pause the ingestion process.
+    The process will pause at the next checkpoint.
+    """
+    session = get_session(session_id)
+    
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+    
+    if session.status == IngestionPhase.COMPLETE:
+        raise HTTPException(status_code=400, detail="Ingestion already completed")
+    
+    if session.status == IngestionPhase.ERROR:
+        raise HTTPException(status_code=400, detail="Ingestion has error")
+    
+    session.is_paused = True
+    
+    return {
+        "status": "paused",
+        "session_id": session_id,
+        "current_phase": session.status.value,
+        "progress": session.progress
+    }
+
+
+@router.post("/{session_id}/resume")
+async def resume_ingestion(session_id: str) -> dict[str, Any]:
+    """
+    Resume a paused ingestion process.
+    """
+    session = get_session(session_id)
+    
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+    
+    if not session.is_paused:
+        raise HTTPException(status_code=400, detail="Ingestion is not paused")
+    
+    session.is_paused = False
+    
+    return {
+        "status": "resumed",
+        "session_id": session_id,
+        "current_phase": session.status.value,
+        "progress": session.progress
+    }
+
+
+@router.get("/{session_id}/status")
+async def get_ingestion_status(session_id: str) -> dict[str, Any]:
+    """Get the current status of an ingestion session."""
+    session = get_session(session_id)
+    
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+    
+    return {
+        "session_id": session_id,
+        "status": session.status.value,
+        "progress": session.progress,
+        "message": session.message,
+        "is_paused": session.is_paused,
+        "error": session.error
+    }
 
 
 @router.get("/sessions")

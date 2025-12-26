@@ -92,3 +92,14 @@ REQUIRE cmd.name IS NOT NULL;
 CREATE CONSTRAINT constraint_policy_name IF NOT EXISTS
 FOR (pol:Policy)
 REQUIRE pol.name IS NOT NULL;
+
+// ------------------------------------------------------------
+// Property: DDD 객체의 속성/필드
+// ------------------------------------------------------------
+CREATE CONSTRAINT constraint_property_id IF NOT EXISTS
+FOR (prop:Property)
+REQUIRE prop.id IS UNIQUE;
+
+CREATE CONSTRAINT constraint_property_name IF NOT EXISTS
+FOR (prop:Property)
+REQUIRE prop.name IS NOT NULL;

@@ -12,8 +12,15 @@ const props = defineProps({
 const canvasStore = useCanvasStore()
 const terminologyStore = useTerminologyStore()
 const isExpanding = ref(false)
+const showProperties = ref(false)
 
 const headerText = computed(() => `<< ${terminologyStore.getTerm('Event')} >>`)
+const hasProperties = computed(() => props.data.properties && props.data.properties.length > 0)
+
+function toggleProperties(e) {
+  e.stopPropagation()
+  showProperties.value = !showProperties.value
+}
 
 // Double-click to expand triggered policies
 async function handleDoubleClick() {
@@ -34,7 +41,7 @@ async function handleDoubleClick() {
 <template>
   <div 
     class="es-node es-node--event"
-    :class="{ 'is-expanding': isExpanding }"
+    :class="{ 'is-expanding': isExpanding, 'has-properties': hasProperties }"
     @dblclick="handleDoubleClick"
   >
     <div class="es-node__header">
@@ -47,6 +54,23 @@ async function handleDoubleClick() {
       </div>
       <div v-if="isExpanding" class="es-node__loading">
         Expanding...
+      </div>
+      
+      <!-- Properties Toggle -->
+      <div v-if="hasProperties" class="es-node__props-toggle" @click="toggleProperties">
+        <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <polyline v-if="!showProperties" points="9 18 15 12 9 6"></polyline>
+          <polyline v-else points="18 15 12 9 6 15"></polyline>
+        </svg>
+        <span>{{ data.properties.length }} attrs</span>
+      </div>
+      
+      <!-- Properties List -->
+      <div v-if="hasProperties && showProperties" class="es-node__props">
+        <div v-for="prop in data.properties" :key="prop.id" class="es-node__prop">
+          <span class="prop-name">{{ prop.name }}</span>
+          <span class="prop-type">{{ prop.type }}</span>
+        </div>
       </div>
     </div>
     
@@ -62,6 +86,10 @@ async function handleDoubleClick() {
   min-width: 130px;
   cursor: pointer;
   transition: transform 0.15s, box-shadow 0.15s;
+}
+
+.es-node--event.has-properties {
+  min-width: 150px;
 }
 
 .es-node--event:hover {
@@ -113,6 +141,57 @@ async function handleDoubleClick() {
 @keyframes pulse {
   0%, 100% { opacity: 0.6; }
   50% { opacity: 1; }
+}
+
+/* Properties section */
+.es-node__props-toggle {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  margin-top: 8px;
+  padding: 4px 8px;
+  background: rgba(255, 255, 255, 0.15);
+  border-radius: 4px;
+  font-size: 0.65rem;
+  color: rgba(255, 255, 255, 0.85);
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.es-node__props-toggle:hover {
+  background: rgba(255, 255, 255, 0.25);
+}
+
+.es-node__props {
+  margin-top: 8px;
+  padding: 6px;
+  background: rgba(255, 255, 255, 0.2);
+  border-radius: 4px;
+  font-size: 0.65rem;
+  max-height: 100px;
+  overflow-y: auto;
+}
+
+.es-node__prop {
+  display: flex;
+  justify-content: space-between;
+  padding: 2px 4px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.15);
+}
+
+.es-node__prop:last-child {
+  border-bottom: none;
+}
+
+.prop-name {
+  font-weight: 600;
+  color: white;
+}
+
+.prop-type {
+  color: rgba(255, 255, 255, 0.7);
+  font-style: italic;
 }
 
 /* Handle styling */

@@ -107,6 +107,18 @@ class PolicyCandidate(BaseModel):
     description: str = Field(..., description="When [event] then [command] description")
 
 
+class PropertyCandidate(BaseModel):
+    """A candidate Property (field/attribute) for DDD objects."""
+
+    id: str = Field(..., description="Unique ID like PROP-ORDER-ORDERID")
+    name: str = Field(..., description="Property name in camelCase like 'orderId'")
+    type: str = Field(..., description="Data type like 'String', 'Integer', 'Date', 'Money', etc.")
+    description: str = Field(default="", description="What this property represents")
+    is_required: bool = Field(default=True, description="Whether this property is required")
+    parent_id: str = Field(..., description="ID of parent object (Command, Event, or Aggregate)")
+    parent_type: str = Field(..., description="Type of parent: 'Command', 'Event', or 'Aggregate'")
+
+
 class UserStoryBreakdown(BaseModel):
     """Breakdown of a User Story into finer-grained tasks."""
 

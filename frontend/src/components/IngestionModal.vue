@@ -36,6 +36,73 @@ const existingDataStats = ref(null)
 const isLoadingStats = ref(false)
 const isClearing = ref(false)
 
+// Draggable panel state
+const panelPosition = ref({ x: null, y: null })
+const isDragging = ref(false)
+const dragOffset = ref({ x: 0, y: 0 })
+
+// Pause state
+const isPaused = ref(false)
+const isTogglingPause = ref(false)
+
+// Panel drag handlers
+function startDrag(e) {
+  if (e.target.closest('.panel-btn')) return // Don't drag when clicking buttons
+  
+  isDragging.value = true
+  const panel = e.currentTarget.closest('.floating-panel')
+  const rect = panel.getBoundingClientRect()
+  
+  dragOffset.value = {
+    x: e.clientX - rect.left,
+    y: e.clientY - rect.top
+  }
+  
+  document.addEventListener('mousemove', onDrag)
+  document.addEventListener('mouseup', stopDrag)
+}
+
+function onDrag(e) {
+  if (!isDragging.value) return
+  
+  const x = e.clientX - dragOffset.value.x
+  const y = e.clientY - dragOffset.value.y
+  
+  // Keep panel within viewport bounds
+  const panelWidth = 320
+  const panelHeight = 200
+  
+  panelPosition.value = {
+    x: Math.max(0, Math.min(window.innerWidth - panelWidth, x)),
+    y: Math.max(0, Math.min(window.innerHeight - panelHeight, y))
+  }
+}
+
+function stopDrag() {
+  isDragging.value = false
+  document.removeEventListener('mousemove', onDrag)
+  document.removeEventListener('mouseup', stopDrag)
+}
+
+// Computed panel style
+const panelStyle = computed(() => {
+  if (panelPosition.value.x !== null && panelPosition.value.y !== null) {
+    return {
+      top: `${panelPosition.value.y}px`,
+      left: `${panelPosition.value.x}px`,
+      right: 'auto',
+      bottom: 'auto'
+    }
+  }
+  // Default position: top-right
+  return {
+    top: 'var(--spacing-lg)',
+    right: 'var(--spacing-lg)',
+    bottom: 'auto',
+    left: 'auto'
+  }
+})
+
 // Computed
 const isOpen = computed({
   get: () => props.modelValue,
@@ -59,7 +126,9 @@ const phaseLabel = computed(() => {
     'extracting_commands': 'Command 추출',
     'extracting_events': 'Event 추출',
     'identifying_policies': 'Policy 식별',
+    'generating_properties': '속성 생성',
     'saving': '저장 중',
+    'paused': '⏸️ 일시 정지됨',
     'complete': '완료',
     'error': '오류'
   }
@@ -243,6 +312,14 @@ function connectToStream(sid) {
     currentMessage.value = data.message
     progress.value = data.progress
     
+    // Track pause state from server
+    if (data.phase === 'paused') {
+      isPaused.value = true
+    } else if (isPaused.value && data.phase !== 'paused') {
+      // If we were paused and now receiving a different phase, we're resumed
+      isPaused.value = false
+    }
+    
     // Handle created objects
     if (data.data?.object) {
       const obj = data.data.object
@@ -261,6 +338,8 @@ function connectToStream(sid) {
         navigatorStore.addEvent(obj)
       } else if (obj.type === 'Policy') {
         navigatorStore.addPolicy(obj)
+      } else if (obj.type === 'Property') {
+        navigatorStore.addProperty(obj)
       }
     }
     
@@ -333,12 +412,38 @@ function closeFloatingPanel() {
   currentMessage.value = ''
   createdItems.value = []
   summary.value = null
+  panelPosition.value = { x: null, y: null } // Reset position
+  isPaused.value = false // Reset pause state
   
   emit('complete')
 }
 
 function toggleMinimize() {
   isPanelMinimized.value = !isPanelMinimized.value
+}
+
+async function togglePause() {
+  if (!sessionId.value || isTogglingPause.value) return
+  
+  isTogglingPause.value = true
+  
+  try {
+    const endpoint = isPaused.value ? 'resume' : 'pause'
+    const response = await fetch(`/api/ingest/${sessionId.value}/${endpoint}`, {
+      method: 'POST'
+    })
+    
+    if (response.ok) {
+      isPaused.value = !isPaused.value
+    } else {
+      const data = await response.json()
+      console.error('Failed to toggle pause:', data.detail)
+    }
+  } catch (err) {
+    console.error('Failed to toggle pause:', err)
+  } finally {
+    isTogglingPause.value = false
+  }
 }
 
 function getTypeIcon(type) {
@@ -348,7 +453,8 @@ function getTypeIcon(type) {
     Aggregate: 'A',
     Command: 'C',
     Event: 'E',
-    Policy: 'P'
+    Policy: 'P',
+    Property: '{ }'
   }
   return icons[type] || '?'
 }
@@ -609,12 +715,26 @@ function useSample() {
   <!-- Floating Progress Panel (Bottom-Right, Non-blocking) -->
   <Teleport to="body">
     <Transition name="slide-up">
-      <div v-if="showFloatingPanel" class="floating-panel" :class="{ 'is-minimized': isPanelMinimized }">
-        <!-- Panel Header -->
-        <div class="floating-panel__header" @click="toggleMinimize">
+      <div 
+        v-if="showFloatingPanel" 
+        class="floating-panel" 
+        :class="{ 'is-minimized': isPanelMinimized, 'is-dragging': isDragging }"
+        :style="panelStyle"
+      >
+        <!-- Panel Header (draggable) -->
+        <div 
+          class="floating-panel__header" 
+          @click="toggleMinimize"
+          @mousedown="startDrag"
+        >
+          <!-- Drag Handle -->
+          <div class="floating-panel__drag-handle" title="드래그하여 이동">
+            <span></span><span></span><span></span>
+          </div>
           <div class="floating-panel__title">
-            <div class="floating-panel__status" :class="{ 'is-complete': summary, 'is-error': error }">
-              <span v-if="isProcessing && !error" class="status-spinner"></span>
+            <div class="floating-panel__status" :class="{ 'is-complete': summary, 'is-error': error, 'is-paused': isPaused }">
+              <span v-if="isPaused" class="status-paused">⏸</span>
+              <span v-else-if="isProcessing && !error" class="status-spinner"></span>
               <svg v-else-if="summary" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                 <polyline points="20 6 9 17 4 12"></polyline>
               </svg>
@@ -625,11 +745,28 @@ function useSample() {
               </svg>
             </div>
             <span class="floating-panel__label">
-              {{ summary ? '생성 완료' : error ? '오류 발생' : phaseLabel }}
+              {{ summary ? '생성 완료' : error ? '오류 발생' : isPaused ? '⏸️ 일시 정지됨' : phaseLabel }}
             </span>
             <span v-if="!summary && !error" class="floating-panel__percent">{{ progress }}%</span>
           </div>
           <div class="floating-panel__actions">
+            <!-- Pause/Resume Button -->
+            <button 
+              v-if="isProcessing && !summary && !error" 
+              class="panel-btn panel-btn--pause"
+              :class="{ 'is-paused': isPaused }"
+              @click.stop="togglePause"
+              :disabled="isTogglingPause"
+              :title="isPaused ? '재개' : '일시 정지'"
+            >
+              <svg v-if="isPaused" width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
+                <polygon points="5 3 19 12 5 21 5 3"></polygon>
+              </svg>
+              <svg v-else width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
+                <rect x="6" y="4" width="4" height="16"></rect>
+                <rect x="14" y="4" width="4" height="16"></rect>
+              </svg>
+            </button>
             <button class="panel-btn" @click.stop="toggleMinimize" :title="isPanelMinimized ? '펼치기' : '접기'">
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                 <polyline v-if="isPanelMinimized" points="18 15 12 9 6 15"></polyline>
@@ -700,6 +837,10 @@ function useSample() {
               <div class="mini-stat">
                 <span class="mini-stat__icon stat-icon--policy">P</span>
                 <span class="mini-stat__value">{{ summary.policies }}</span>
+              </div>
+              <div v-if="summary.properties" class="mini-stat">
+                <span class="mini-stat__icon stat-icon--property">{ }</span>
+                <span class="mini-stat__value">{{ summary.properties }}</span>
               </div>
             </div>
             <p class="mini-summary__hint">네비게이터에서 확인하세요</p>
@@ -1112,11 +1253,11 @@ function useSample() {
 }
 
 /* ============================================
-   Floating Panel Styles (Bottom-Right)
+   Floating Panel Styles (Top-Right, Draggable)
    ============================================ */
 .floating-panel {
   position: fixed;
-  bottom: var(--spacing-lg);
+  top: var(--spacing-lg);
   right: var(--spacing-lg);
   width: 320px;
   background: var(--color-bg-secondary);
@@ -1125,11 +1266,16 @@ function useSample() {
   box-shadow: var(--shadow-lg);
   z-index: 900;
   overflow: hidden;
-  transition: width 0.2s ease, height 0.2s ease;
+  transition: width 0.2s ease, box-shadow 0.2s ease;
 }
 
 .floating-panel.is-minimized {
   width: 240px;
+}
+
+.floating-panel.is-dragging {
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.6);
+  cursor: grabbing;
 }
 
 .floating-panel__header {
@@ -1138,8 +1284,37 @@ function useSample() {
   justify-content: space-between;
   padding: var(--spacing-sm) var(--spacing-md);
   background: var(--color-bg-tertiary);
-  cursor: pointer;
+  cursor: grab;
   user-select: none;
+}
+
+.floating-panel__header:active {
+  cursor: grabbing;
+}
+
+.floating-panel.is-dragging .floating-panel__header {
+  cursor: grabbing;
+}
+
+.floating-panel__drag-handle {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-right: var(--spacing-sm);
+  padding: 4px 2px;
+  opacity: 0.4;
+  transition: opacity 0.15s;
+}
+
+.floating-panel__header:hover .floating-panel__drag-handle {
+  opacity: 0.7;
+}
+
+.floating-panel__drag-handle span {
+  width: 12px;
+  height: 2px;
+  background: var(--color-text-light);
+  border-radius: 1px;
 }
 
 .floating-panel__title {
@@ -1165,6 +1340,15 @@ function useSample() {
 
 .floating-panel__status.is-error {
   background: #ff6464;
+}
+
+.floating-panel__status.is-paused {
+  background: var(--color-warning, #f59e0b);
+}
+
+.status-paused {
+  font-size: 10px;
+  line-height: 1;
 }
 
 .status-spinner {
@@ -1210,6 +1394,29 @@ function useSample() {
 .panel-btn:hover {
   background: var(--color-bg);
   color: var(--color-text-bright);
+}
+
+.panel-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.panel-btn--pause {
+  color: var(--color-warning, #f59e0b);
+}
+
+.panel-btn--pause:hover {
+  background: rgba(245, 158, 11, 0.15);
+  color: var(--color-warning, #f59e0b);
+}
+
+.panel-btn--pause.is-paused {
+  color: var(--color-success, #10b981);
+}
+
+.panel-btn--pause.is-paused:hover {
+  background: rgba(16, 185, 129, 0.15);
+  color: var(--color-success, #10b981);
 }
 
 .floating-panel__progress {
@@ -1293,6 +1500,7 @@ function useSample() {
 .item-icon--command { background: var(--color-command); }
 .item-icon--event { background: var(--color-event); }
 .item-icon--policy { background: var(--color-policy); }
+.item-icon--property { background: #868e96; font-size: 0.5rem; }
 
 .mini-item__name {
   font-size: 0.75rem;
@@ -1345,6 +1553,7 @@ function useSample() {
 .stat-icon--command { background: var(--color-command); }
 .stat-icon--event { background: var(--color-event); }
 .stat-icon--policy { background: var(--color-policy); }
+.stat-icon--property { background: #868e96; font-size: 0.45rem; }
 
 .mini-stat__value {
   font-size: 0.9rem;
@@ -1394,7 +1603,7 @@ function useSample() {
 
 .slide-up-enter-from,
 .slide-up-leave-to {
-  transform: translateY(20px);
+  transform: translateX(20px);
   opacity: 0;
 }
 
