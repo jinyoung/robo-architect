@@ -1,9 +1,11 @@
 <script setup>
 import { ref } from 'vue'
 import { useCanvasStore } from '../stores/canvas'
+import { useTerminologyStore } from '../stores/terminology'
 import IngestionModal from './IngestionModal.vue'
 
 const canvasStore = useCanvasStore()
+const terminologyStore = useTerminologyStore()
 const showIngestionModal = ref(false)
 
 function handleIngestionComplete() {
@@ -15,7 +17,7 @@ function handleIngestionComplete() {
   <header class="top-bar">
     <div class="top-bar__logo">
       <div class="top-bar__logo-icon"></div>
-      <span>Event Storming Navigator</span>
+      <span>Robo Architect</span>
     </div>
     
     <div class="top-bar__divider"></div>
@@ -47,6 +49,21 @@ function handleIngestionComplete() {
     </div>
     
     <div style="flex: 1;"></div>
+    
+    <!-- Developer Mode Toggle -->
+    <div class="term-toggle">
+      <span class="term-toggle__label">Developer Terms</span>
+      <button 
+        class="term-toggle__switch"
+        :class="{ 'is-active': terminologyStore.developerMode }"
+        @click="terminologyStore.toggleDeveloperMode()"
+        :title="terminologyStore.developerMode ? 'Switch to Event Storming terms' : 'Switch to Developer terms'"
+      >
+        <span class="term-toggle__knob"></span>
+      </button>
+    </div>
+    
+    <div class="top-bar__divider"></div>
     
     <button 
       v-if="canvasStore.nodes.length > 0"
@@ -91,6 +108,56 @@ function handleIngestionComplete() {
 
 .upload-btn:active {
   transform: translateY(0);
+}
+
+/* Developer Mode Toggle */
+.term-toggle {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.term-toggle__label {
+  font-size: 0.8rem;
+  color: var(--color-text-light);
+  font-weight: 500;
+}
+
+.term-toggle__switch {
+  position: relative;
+  width: 44px;
+  height: 24px;
+  background: var(--color-bg-tertiary);
+  border: 1px solid var(--color-border);
+  border-radius: 12px;
+  cursor: pointer;
+  transition: all 0.25s ease;
+  padding: 0;
+}
+
+.term-toggle__switch:hover {
+  border-color: var(--color-accent);
+}
+
+.term-toggle__switch.is-active {
+  background: linear-gradient(135deg, #10b981 0%, #059669 100%);
+  border-color: #059669;
+}
+
+.term-toggle__knob {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 18px;
+  height: 18px;
+  background: white;
+  border-radius: 50%;
+  transition: transform 0.25s ease;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.3);
+}
+
+.term-toggle__switch.is-active .term-toggle__knob {
+  transform: translateX(20px);
 }
 </style>
 

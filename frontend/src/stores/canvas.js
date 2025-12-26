@@ -9,6 +9,12 @@ export const useCanvasStore = defineStore('canvas', () => {
   // Track BC containers and their children
   const bcContainers = ref({}) // { bcId: { nodeIds: [], bounds: {} } }
   
+  // Track collapsed state of BCs
+  const collapsedBCs = ref({}) // { bcId: true/false }
+  
+  // Track BC-level edges (for cross-BC relationships)
+  const bcLevelEdges = ref({}) // { 'sourceBCId-targetBCId': { count, type } }
+  
   // Node type configurations
   const nodeTypeConfig = {
     Command: { 
@@ -47,14 +53,17 @@ export const useCanvasStore = defineStore('canvas', () => {
   }
   
   // Get or create BC container for a given BC ID
-  function getOrCreateBCContainer(bcId, bcName, bcDescription) {
+  function getOrCreateBCContainer(bcId, bcName, bcDescription, startCollapsed = true) {
     // Check if BC container already exists
     let bcNode = nodes.value.find(n => n.id === bcId && n.type === 'boundedcontext')
     
     if (!bcNode) {
       // Create new BC container
       const existingBCs = nodes.value.filter(n => n.type === 'boundedcontext')
-      const offsetX = existingBCs.length * 600
+      const offsetX = existingBCs.length * 450
+      
+      // Start collapsed by default
+      collapsedBCs.value[bcId] = startCollapsed
       
       bcNode = {
         id: bcId,
@@ -65,9 +74,13 @@ export const useCanvasStore = defineStore('canvas', () => {
           name: bcName || bcId.replace('BC-', ''),
           description: bcDescription,
           type: 'BoundedContext',
-          label: bcName
+          label: bcName,
+          collapsed: startCollapsed
         },
-        style: {
+        style: startCollapsed ? {
+          width: '220px',
+          height: '60px'
+        } : {
           width: '550px',
           height: '350px'
         },
@@ -116,12 +129,17 @@ export const useCanvasStore = defineStore('canvas', () => {
   
   // Update BC container size based on children
   function updateBCSize(bcId) {
-    const bcNode = nodes.value.find(n => n.id === bcId)
-    if (!bcNode) return
+    const bcNodeIndex = nodes.value.findIndex(n => n.id === bcId)
+    if (bcNodeIndex === -1) return
     
-    const children = nodes.value.filter(n => n.parentNode === bcId)
+    const bcNode = nodes.value[bcNodeIndex]
+    const children = nodes.value.filter(n => n.parentNode === bcId && !n.hidden)
+    
     if (children.length === 0) {
-      bcNode.style = { width: '550px', height: '350px' }
+      nodes.value[bcNodeIndex] = {
+        ...bcNode,
+        style: { width: '550px', height: '350px' }
+      }
       return
     }
     
@@ -146,9 +164,12 @@ export const useCanvasStore = defineStore('canvas', () => {
     const newWidth = Math.max(550, maxX + padding)
     const newHeight = Math.max(350, maxY + padding)
     
-    bcNode.style = {
-      width: `${newWidth}px`,
-      height: `${newHeight}px`
+    nodes.value[bcNodeIndex] = {
+      ...bcNode,
+      style: {
+        width: `${newWidth}px`,
+        height: `${newHeight}px`
+      }
     }
   }
   
@@ -431,16 +452,32 @@ export const useCanvasStore = defineStore('canvas', () => {
           }
         })
         
-        // Update BC size
-        updateBCSize(bcId)
+        // Update BC size if not collapsed
+        if (!collapsedBCs.value[bcId]) {
+          updateBCSize(bcId)
+        } else {
+          // If collapsed, hide all children and set small size
+          const childNodes = nodes.value.filter(n => n.parentNode === bcId)
+          childNodes.forEach(child => {
+            child.hidden = true
+          })
+        }
         
         bcIndex++
       }
     }
     
-    // Add relationships as edges
+    // Add relationships as edges (but hide if connected to hidden nodes)
     relationships.forEach(rel => {
-      addEdge(rel.source, rel.target, rel.type)
+      const edge = addEdge(rel.source, rel.target, rel.type)
+      if (edge) {
+        // Check if either source or target is hidden
+        const sourceNode = nodes.value.find(n => n.id === rel.source)
+        const targetNode = nodes.value.find(n => n.id === rel.target)
+        if (sourceNode?.hidden || targetNode?.hidden) {
+          edge.hidden = true
+        }
+      }
     })
     
     return newNodes
@@ -472,6 +509,14 @@ export const useCanvasStore = defineStore('canvas', () => {
       return null
     }
     
+    // Check if this is a cross-BC edge (TRIGGERS between different BCs)
+    const sourceNode = nodes.value.find(n => n.id === sourceId)
+    const targetNode = nodes.value.find(n => n.id === targetId)
+    const sourceBCId = sourceNode?.parentNode
+    const targetBCId = targetNode?.parentNode
+    
+    const isCrossBC = sourceBCId && targetBCId && sourceBCId !== targetBCId
+    
     const edge = {
       id: edgeId,
       source: sourceId,
@@ -479,14 +524,66 @@ export const useCanvasStore = defineStore('canvas', () => {
       type: 'smoothstep',
       animated: edgeType === 'TRIGGERS',
       style: getEdgeStyle(edgeType),
+      markerEnd: getEdgeMarkerEnd(edgeType),
       label: getEdgeLabel(edgeType),
       labelStyle: { fill: '#c1c2c5', fontSize: 10, fontWeight: 500 },
       labelBgStyle: { fill: '#1e1e2e', fillOpacity: 0.9 },
-      labelBgPadding: [4, 4]
+      labelBgPadding: [4, 4],
+      data: { edgeType, isCrossBC, sourceBCId, targetBCId }
     }
     
     edges.value.push(edge)
+    
+    // If cross-BC edge, also create/update BC-level edge
+    if (isCrossBC && edgeType === 'TRIGGERS') {
+      addOrUpdateBCLevelEdge(sourceBCId, targetBCId, edgeType)
+    }
+    
     return edge
+  }
+  
+  // Add or update BC-level edge for cross-BC relationships
+  function addOrUpdateBCLevelEdge(sourceBCId, targetBCId, edgeType) {
+    const bcEdgeId = `bc-edge-${sourceBCId}-${targetBCId}`
+    
+    // Check if BC edge already exists
+    const existingEdge = edges.value.find(e => e.id === bcEdgeId)
+    if (existingEdge) {
+      // Update count in data
+      existingEdge.data = existingEdge.data || {}
+      existingEdge.data.count = (existingEdge.data.count || 1) + 1
+      return existingEdge
+    }
+    
+    // Check if both BCs are expanded - if so, hide the BC-level edge
+    const sourceBCCollapsed = collapsedBCs.value[sourceBCId] ?? true
+    const targetBCCollapsed = collapsedBCs.value[targetBCId] ?? true
+    const shouldHide = !sourceBCCollapsed && !targetBCCollapsed
+    
+    // Create BC-level edge
+    const bcEdge = {
+      id: bcEdgeId,
+      source: sourceBCId,
+      target: targetBCId,
+      type: 'smoothstep',
+      animated: true,
+      hidden: shouldHide,
+      style: { stroke: '#a78bfa', strokeWidth: 3, strokeDasharray: '8 4' },
+      markerEnd: {
+        type: 'arrowclosed',
+        color: '#a78bfa',
+        width: 24,
+        height: 24
+      },
+      label: 'triggers',
+      labelStyle: { fill: '#a78bfa', fontSize: 11, fontWeight: 600 },
+      labelBgStyle: { fill: '#1e1e2e', fillOpacity: 0.95 },
+      labelBgPadding: [6, 4],
+      data: { isBCLevelEdge: true, edgeType, count: 1 }
+    }
+    
+    edges.value.push(bcEdge)
+    return bcEdge
   }
   
   // Get edge style based on type
@@ -498,6 +595,25 @@ export const useCanvasStore = defineStore('canvas', () => {
       HAS_COMMAND: { stroke: '#fcc419', strokeWidth: 1.5, strokeDasharray: '4 2' }
     }
     return styles[edgeType] || { stroke: '#909296', strokeWidth: 1 }
+  }
+  
+  // Get marker end (arrow) for edge
+  function getEdgeMarkerEnd(edgeType) {
+    const colors = {
+      EMITS: '#fd7e14',
+      TRIGGERS: '#b197fc',
+      INVOKES: '#5c7cfa'
+    }
+    const color = colors[edgeType]
+    if (color) {
+      return {
+        type: 'arrowclosed',
+        color: color,
+        width: 20,
+        height: 20
+      }
+    }
+    return undefined
   }
   
   // Get edge label
@@ -521,6 +637,130 @@ export const useCanvasStore = defineStore('canvas', () => {
     
     nodes.value = nodes.value.filter(n => n.id !== nodeId)
     edges.value = edges.value.filter(e => e.source !== nodeId && e.target !== nodeId)
+  }
+  
+  // Remove a BC and all its children from canvas
+  function removeBCWithChildren(bcId) {
+    // Find all children of this BC
+    const childIds = nodes.value
+      .filter(n => n.parentNode === bcId)
+      .map(n => n.id)
+    
+    // Remove all children first
+    childIds.forEach(childId => {
+      edges.value = edges.value.filter(e => e.source !== childId && e.target !== childId)
+    })
+    nodes.value = nodes.value.filter(n => n.parentNode !== bcId)
+    
+    // Remove edges connected to BC (including BC-level edges)
+    edges.value = edges.value.filter(e => e.source !== bcId && e.target !== bcId)
+    
+    // Also remove BC-level edges that reference this BC
+    edges.value = edges.value.filter(e => {
+      if (e.data?.isBCLevelEdge) {
+        return e.data.sourceBCId !== bcId && e.data.targetBCId !== bcId
+      }
+      return true
+    })
+    
+    // Remove the BC itself
+    nodes.value = nodes.value.filter(n => n.id !== bcId)
+    
+    // Clean up state
+    delete collapsedBCs.value[bcId]
+    delete bcContainers.value[bcId]
+    delete bcLevelEdges.value[bcId]
+  }
+  
+  // Toggle BC collapsed state
+  function toggleBCCollapse(bcId) {
+    const bcNodeIndex = nodes.value.findIndex(n => n.id === bcId)
+    if (bcNodeIndex === -1) return
+    
+    const bcNode = nodes.value[bcNodeIndex]
+    const isCurrentlyCollapsed = collapsedBCs.value[bcId] ?? false
+    const newCollapsed = !isCurrentlyCollapsed
+    
+    collapsedBCs.value[bcId] = newCollapsed
+    
+    // Get all child node indices
+    const childIndices = []
+    const childIds = []
+    nodes.value.forEach((n, idx) => {
+      if (n.parentNode === bcId) {
+        childIndices.push(idx)
+        childIds.push(n.id)
+      }
+    })
+    
+    if (newCollapsed) {
+      // Collapse: hide children and shrink BC
+      childIndices.forEach(idx => {
+        nodes.value[idx] = { ...nodes.value[idx], hidden: true }
+      })
+      
+      // Hide edges connected to children, show BC-level edges
+      edges.value = edges.value.map(edge => {
+        // BC-level edges: show when this BC is collapsed
+        if (edge.data?.isBCLevelEdge) {
+          if (edge.source === bcId || edge.target === bcId) {
+            return { ...edge, hidden: false }
+          }
+          return edge
+        }
+        if (childIds.includes(edge.source) || childIds.includes(edge.target)) {
+          return { ...edge, hidden: true }
+        }
+        return edge
+      })
+      
+      // Update BC node with new collapsed state and size
+      nodes.value[bcNodeIndex] = {
+        ...bcNode,
+        data: { ...bcNode.data, collapsed: true },
+        style: { width: '220px', height: '60px' }
+      }
+    } else {
+      // Expand: show children
+      childIndices.forEach(idx => {
+        nodes.value[idx] = { ...nodes.value[idx], hidden: false }
+      })
+      
+      // Show edges connected to children, update BC-level edges visibility
+      edges.value = edges.value.map(edge => {
+        // BC-level edges: hide if BOTH connected BCs are expanded
+        if (edge.data?.isBCLevelEdge) {
+          if (edge.source === bcId || edge.target === bcId) {
+            const otherBcId = edge.source === bcId ? edge.target : edge.source
+            const otherBcCollapsed = collapsedBCs.value[otherBcId] ?? true
+            // Hide BC-level edge if both BCs are expanded
+            return { ...edge, hidden: !otherBcCollapsed }
+          }
+          return edge
+        }
+        if (childIds.includes(edge.source) || childIds.includes(edge.target)) {
+          return { ...edge, hidden: false }
+        }
+        return edge
+      })
+      
+      // Update BC node with expanded state
+      nodes.value[bcNodeIndex] = {
+        ...bcNode,
+        data: { ...bcNode.data, collapsed: false }
+      }
+      
+      // Calculate proper size
+      updateBCSize(bcId)
+    }
+    
+    // Trigger reactivity by reassigning the array
+    nodes.value = [...nodes.value]
+  }
+  
+  // Check if BC is collapsed
+  function isBCCollapsed(bcId) {
+    return collapsedBCs.value[bcId] ?? false
   }
   
   // Clear canvas
@@ -870,11 +1110,17 @@ export const useCanvasStore = defineStore('canvas', () => {
     nodeIds,
     nodeTypeConfig,
     bcContainers,
+    collapsedBCs,
+    bcLevelEdges,
     isOnCanvas,
     addNode,
     addNodesWithLayout,
     addEdge,
+    addOrUpdateBCLevelEdge,
     removeNode,
+    removeBCWithChildren,
+    toggleBCCollapse,
+    isBCCollapsed,
     clearCanvas,
     updateNodePosition,
     updateBCSize,

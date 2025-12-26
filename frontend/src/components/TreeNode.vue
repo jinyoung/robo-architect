@@ -2,6 +2,7 @@
 import { computed, ref, onMounted, inject } from 'vue'
 import { useNavigatorStore } from '../stores/navigator'
 import { useCanvasStore } from '../stores/canvas'
+import { useTerminologyStore } from '../stores/terminology'
 
 const props = defineProps({
   node: {
@@ -20,6 +21,7 @@ const props = defineProps({
 
 const navigatorStore = useNavigatorStore()
 const canvasStore = useCanvasStore()
+const terminologyStore = useTerminologyStore()
 
 // Inject edit function from App.vue
 const editUserStory = inject('editUserStory', null)
@@ -40,8 +42,19 @@ onMounted(() => {
 // Check if node is newly added
 const isNewlyAdded = computed(() => navigatorStore.isNewlyAdded(props.node.id))
 
-// Get node type icon
+// Get node type icon based on developer mode
 const nodeIcon = computed(() => {
+  if (terminologyStore.developerMode) {
+    const devIcons = {
+      UserStory: 'US',
+      BoundedContext: 'MS',
+      Aggregate: 'DB',
+      Command: 'API',
+      Event: 'E',
+      Policy: 'SVC'
+    }
+    return devIcons[props.node.type] || '?'
+  }
   const icons = {
     UserStory: 'US',
     BoundedContext: 'BC',
