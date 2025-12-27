@@ -1,6 +1,5 @@
 <script setup>
 import { computed, inject } from 'vue'
-import { Handle, Position } from '@vue-flow/core'
 import { useCanvasStore } from '../../stores/canvas'
 
 const props = defineProps({
@@ -73,20 +72,6 @@ function handleDelete(event) {
     <div v-if="!isCollapsed" class="bc-container__body">
       <!-- Child nodes are automatically placed here by Vue Flow -->
     </div>
-    
-    <!-- Handles for BC-level edges (cross-BC relationships) -->
-    <Handle 
-      type="source" 
-      :position="Position.Right" 
-      id="bc-source"
-      class="bc-handle bc-handle--source"
-    />
-    <Handle 
-      type="target" 
-      :position="Position.Left" 
-      id="bc-target"
-      class="bc-handle bc-handle--target"
-    />
   </div>
 </template>
 
@@ -206,35 +191,5 @@ function handleDelete(event) {
 /* Make the node draggable only from header */
 :deep(.vue-flow__node) {
   cursor: default;
-}
-
-/* BC-level edge handles */
-.bc-handle {
-  width: 12px !important;
-  height: 12px !important;
-  background: rgba(139, 92, 246, 0.6) !important;
-  border: 2px solid rgba(139, 92, 246, 0.9) !important;
-  border-radius: 50% !important;
-  transition: all 0.2s ease;
-}
-
-.bc-handle:hover {
-  background: rgba(139, 92, 246, 0.9) !important;
-  transform: scale(1.2);
-}
-
-.bc-handle--source {
-  right: -6px !important;
-}
-
-.bc-handle--target {
-  left: -6px !important;
-}
-
-/* Show handles more prominently when collapsed */
-.bc-container--collapsed .bc-handle {
-  width: 14px !important;
-  height: 14px !important;
-  background: rgba(139, 92, 246, 0.8) !important;
 }
 </style>

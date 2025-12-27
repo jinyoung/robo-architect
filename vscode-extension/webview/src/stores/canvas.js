@@ -1,7 +1,10 @@
 import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
+import { getApiBaseUrl } from '../utils/vscode'
 
 export const useCanvasStore = defineStore('canvas', () => {
+  // Get API base URL (empty for web, http://localhost:PORT for VS Code)
+  const getBaseUrl = () => getApiBaseUrl()
   // Nodes on the canvas
   const nodes = ref([])
   const edges = ref([])
@@ -155,7 +158,7 @@ export const useCanvasStore = defineStore('canvas', () => {
   // Refresh a node from the server
   async function refreshNode(nodeId) {
     try {
-      const response = await fetch(`/api/chat/node/${nodeId}`)
+      const response = await fetch(`${getBaseUrl()}/api/chat/node/${nodeId}`)
       if (!response.ok) return false
       
       const data = await response.json()
@@ -786,9 +789,17 @@ export const useCanvasStore = defineStore('canvas', () => {
       }
     }
     
-    // Add relationships as edges (addEdge now handles hidden state automatically)
+    // Add relationships as edges (but hide if connected to hidden nodes)
     relationships.forEach(rel => {
-      addEdge(rel.source, rel.target, rel.type)
+      const edge = addEdge(rel.source, rel.target, rel.type)
+      if (edge) {
+        // Check if either source or target is hidden
+        const sourceNode = nodes.value.find(n => n.id === rel.source)
+        const targetNode = nodes.value.find(n => n.id === rel.target)
+        if (sourceNode?.hidden || targetNode?.hidden) {
+          edge.hidden = true
+        }
+      }
     })
     
     return newNodes
@@ -815,8 +826,8 @@ export const useCanvasStore = defineStore('canvas', () => {
       return null
     }
     
-    // Don't show HAS_AGGREGATE, HAS_POLICY, HAS_READMODEL edges (implied by container)
-    if (edgeType === 'HAS_AGGREGATE' || edgeType === 'HAS_POLICY' || edgeType === 'HAS_READMODEL') {
+    // Don't show HAS_AGGREGATE or HAS_POLICY edges (implied by container)
+    if (edgeType === 'HAS_AGGREGATE' || edgeType === 'HAS_POLICY') {
       return null
     }
     
@@ -828,18 +839,12 @@ export const useCanvasStore = defineStore('canvas', () => {
     
     const isCrossBC = sourceBCId && targetBCId && sourceBCId !== targetBCId
     
-    // Check if source or target is hidden (for proper edge visibility)
-    const isSourceHidden = sourceNode?.hidden ?? false
-    const isTargetHidden = targetNode?.hidden ?? false
-    const shouldHideEdge = isSourceHidden || isTargetHidden
-    
     const edge = {
       id: edgeId,
       source: sourceId,
       target: targetId,
       type: 'smoothstep',
       animated: edgeType === 'TRIGGERS',
-      hidden: shouldHideEdge,  // Hide edge if connected to hidden nodes
       style: getEdgeStyle(edgeType),
       markerEnd: getEdgeMarkerEnd(edgeType),
       label: getEdgeLabel(edgeType),
@@ -877,13 +882,11 @@ export const useCanvasStore = defineStore('canvas', () => {
     const targetBCCollapsed = collapsedBCs.value[targetBCId] ?? true
     const shouldHide = !sourceBCCollapsed && !targetBCCollapsed
     
-    // Create BC-level edge connecting the BC container nodes
+    // Create BC-level edge
     const bcEdge = {
       id: bcEdgeId,
       source: sourceBCId,
       target: targetBCId,
-      sourceHandle: 'bc-source',  // Connect to BC's source handle
-      targetHandle: 'bc-target',  // Connect to BC's target handle
       type: 'smoothstep',
       animated: true,
       hidden: shouldHide,
@@ -898,11 +901,10 @@ export const useCanvasStore = defineStore('canvas', () => {
       labelStyle: { fill: '#a78bfa', fontSize: 11, fontWeight: 600 },
       labelBgStyle: { fill: '#1e1e2e', fillOpacity: 0.95 },
       labelBgPadding: [6, 4],
-      data: { isBCLevelEdge: true, edgeType, count: 1, sourceBCId, targetBCId }
+      data: { isBCLevelEdge: true, edgeType, count: 1 }
     }
     
     edges.value.push(bcEdge)
-    console.log('Created BC-level edge:', bcEdgeId, 'hidden:', shouldHide)
     return bcEdge
   }
   
@@ -1111,7 +1113,7 @@ export const useCanvasStore = defineStore('canvas', () => {
       const params = new URLSearchParams()
       ids.forEach(id => params.append('node_ids', id))
       
-      const response = await fetch(`/api/graph/find-relations?${params}`)
+      const response = await fetch(`${getBaseUrl()}/api/graph/find-relations?${params}`)
       const relations = await response.json()
       
       relations.forEach(rel => {
@@ -1138,7 +1140,7 @@ export const useCanvasStore = defineStore('canvas', () => {
       newNodeIds.forEach(id => params.append('new_node_ids', id))
       existingIds.forEach(id => params.append('existing_node_ids', id))
       
-      const response = await fetch(`/api/graph/find-cross-bc-relations?${params}`)
+      const response = await fetch(`${getBaseUrl()}/api/graph/find-cross-bc-relations?${params}`)
       const relations = await response.json()
       
       let addedCount = 0
@@ -1227,7 +1229,7 @@ export const useCanvasStore = defineStore('canvas', () => {
   // Expand Event to show triggered Policies and their BCs
   async function expandEventTriggers(eventId) {
     try {
-      const response = await fetch(`/api/graph/event-triggers/${eventId}`)
+      const response = await fetch(`${getBaseUrl()}/api/graph/event-triggers/${eventId}`)
       if (!response.ok) {
         console.log('No triggers found for event:', eventId)
         return []

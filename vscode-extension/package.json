@@ -1,0 +1,120 @@
+{
+  "name": "event-storming-navigator",
+  "displayName": "Event Storming Navigator",
+  "description": "AI-powered Event Storming and DDD modeling tool for VS Code",
+  "version": "1.0.0",
+  "publisher": "uengine",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Visualization",
+    "Other"
+  ],
+  "keywords": [
+    "event-storming",
+    "ddd",
+    "domain-driven-design",
+    "modeling"
+  ],
+  "activationEvents": [],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "event-storming",
+          "title": "Event Storming",
+          "icon": "resources/icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "event-storming": [
+        {
+          "id": "eventStorming.welcome",
+          "name": "Navigator"
+        }
+      ]
+    },
+    "viewsWelcome": [
+      {
+        "view": "eventStorming.welcome",
+        "contents": "Event Storming Navigator\n\nDDD 기반 이벤트 스토밍 도구입니다.\n\n[🚀 전체화면 캔버스 열기](command:eventStorming.openCanvas)\n\n서버 상태를 관리하려면:\n[▶️ 서버 시작](command:eventStorming.startServer)\n[⏹️ 서버 중지](command:eventStorming.stopServer)"
+      }
+    ],
+    "commands": [
+      {
+        "command": "eventStorming.openCanvas",
+        "title": "Open Event Storming Canvas",
+        "category": "Event Storming",
+        "icon": "$(preview)"
+      },
+      {
+        "command": "eventStorming.startServer",
+        "title": "Start Backend Server",
+        "category": "Event Storming",
+        "icon": "$(play)"
+      },
+      {
+        "command": "eventStorming.stopServer",
+        "title": "Stop Backend Server",
+        "category": "Event Storming",
+        "icon": "$(debug-stop)"
+      }
+    ],
+    "menus": {
+      "view/title": [
+        {
+          "command": "eventStorming.openCanvas",
+          "when": "view == eventStorming.welcome",
+          "group": "navigation"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "Event Storming Navigator",
+      "properties": {
+        "eventStorming.pythonPath": {
+          "type": "string",
+          "default": "",
+          "description": "Path to Python executable (leave empty to auto-detect)"
+        },
+        "eventStorming.serverPort": {
+          "type": "number",
+          "default": 8001,
+          "description": "Port for the backend server (default: 8001 to avoid conflict with web version)"
+        },
+        "eventStorming.autoStartServer": {
+          "type": "boolean",
+          "default": true,
+          "description": "Automatically start the backend server on extension activation"
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run build",
+    "build": "npm run build:extension && npm run build:webview",
+    "build:extension": "esbuild ./src/extension.ts --bundle --outfile=dist/extension.js --external:vscode --format=cjs --platform=node",
+    "build:webview": "cd webview && npm run build",
+    "watch": "esbuild ./src/extension.ts --bundle --outfile=dist/extension.js --external:vscode --format=cjs --platform=node --watch",
+    "dev": "concurrently \"npm run watch\" \"cd webview && npm run dev\"",
+    "package": "vsce package",
+    "lint": "eslint src --ext ts"
+  },
+  "devDependencies": {
+    "@types/node": "^20.10.0",
+    "@types/vscode": "^1.85.0",
+    "@typescript-eslint/eslint-plugin": "^6.13.0",
+    "@typescript-eslint/parser": "^6.13.0",
+    "concurrently": "^8.2.2",
+    "esbuild": "^0.19.8",
+    "eslint": "^8.55.0",
+    "typescript": "^5.3.2"
+  },
+  "dependencies": {
+    "tree-kill": "^1.2.2"
+  }
+}
+
