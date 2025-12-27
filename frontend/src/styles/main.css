@@ -285,6 +285,23 @@ body {
   font-size: 0.5rem;
 }
 
+.tree-node__icon--propertiesgroup {
+  background: linear-gradient(135deg, #868e96 0%, #495057 100%);
+  font-size: 0.55rem;
+}
+
+.tree-node__icon--cqrsoperation {
+  background: linear-gradient(135deg, #fcc419 0%, #fd7e14 100%);
+  font-size: 0.6rem;
+}
+
+.tree-node__icon--ui {
+  background: var(--color-ui-light);
+  color: var(--color-ui-dark);
+  border: 1px solid var(--color-ui);
+  font-size: 0.55rem;
+}
+
 .tree-node__label {
   font-size: 0.875rem;
   color: var(--color-text);

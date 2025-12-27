@@ -158,6 +158,10 @@ watch(() => navigatorStore.loading, (newVal) => {
         <span class="legend-color legend-color--readmodel"></span>
         <span>{{ terminologyStore.getTerm('ReadModel') }}</span>
       </div>
+      <div class="legend-item">
+        <span class="legend-color legend-color--ui"></span>
+        <span>{{ terminologyStore.getTerm('UI') }}</span>
+      </div>
     </div>
   </aside>
 </template>
@@ -310,5 +314,6 @@ watch(() => navigatorStore.loading, (newVal) => {
 .legend-color--policy { background: var(--color-policy); }
 .legend-color--aggregate { background: var(--color-aggregate); }
 .legend-color--readmodel { background: var(--color-readmodel); }
+.legend-color--ui { background: var(--color-ui-light); border: 1px solid var(--color-ui); }
 </style>
 

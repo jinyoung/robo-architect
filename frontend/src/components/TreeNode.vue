@@ -53,7 +53,10 @@ const nodeIcon = computed(() => {
       Event: 'E',
       Policy: 'SVC',
       Property: '{ }',
-      ReadModel: 'RM'
+      PropertiesGroup: '{ }',
+      ReadModel: 'RM',
+      CQRSOperation: 'OP',
+      UI: 'UI'
     }
     return devIcons[props.node.type] || '?'
   }
@@ -65,7 +68,10 @@ const nodeIcon = computed(() => {
     Event: 'E',
     Policy: 'P',
     Property: '{ }',
-    ReadModel: 'RM'
+    PropertiesGroup: '📦',
+    ReadModel: 'RM',
+    CQRSOperation: '⚡',
+    UI: '📱'
   }
   return icons[props.node.type] || '?'
 })
@@ -110,42 +116,70 @@ const children = computed(() => {
       ...rm,
       type: 'ReadModel'
     }))
-    return [...userStories, ...aggregates, ...policies, ...readmodels]
+    const uis = (props.tree.uis || []).map(ui => ({
+      ...ui,
+      type: 'UI'
+    }))
+    return [...userStories, ...aggregates, ...policies, ...readmodels, ...uis]
   }
   
   if (type === 'Aggregate') {
-    const properties = (props.node.properties || []).map(p => ({
-      ...p,
-      type: 'Property'
-    }))
+    const result = []
+    
+    // Properties group
+    const properties = props.node.properties || []
+    if (properties.length > 0) {
+      result.push({
+        id: `${props.node.id}-props`,
+        name: `Properties (${properties.length})`,
+        type: 'PropertiesGroup',
+        properties: properties
+      })
+    }
+    
+    // Commands
     const commands = (props.node.commands || []).map(c => ({
       ...c,
       type: 'Command'
     }))
-    const events = (props.node.events || []).map(e => ({
-      ...e,
-      type: 'Event'
-    }))
-    return [...properties, ...commands, ...events]
+    
+    return [...result, ...commands]
   }
   
   if (type === 'Command') {
-    const properties = (props.node.properties || []).map(p => ({
-      ...p,
-      type: 'Property'
-    }))
+    const result = []
+    
+    // Properties group
+    const properties = props.node.properties || []
+    if (properties.length > 0) {
+      result.push({
+        id: `${props.node.id}-props`,
+        name: `Properties (${properties.length})`,
+        type: 'PropertiesGroup',
+        properties: properties
+      })
+    }
+    
+    // Events
     const events = (props.node.events || []).map(e => ({
       ...e,
       type: 'Event'
     }))
-    return [...properties, ...events]
+    
+    return [...result, ...events]
   }
   
   if (type === 'Event') {
-    return (props.node.properties || []).map(p => ({
-      ...p,
-      type: 'Property'
-    }))
+    const properties = props.node.properties || []
+    if (properties.length > 0) {
+      return [{
+        id: `${props.node.id}-props`,
+        name: `Properties (${properties.length})`,
+        type: 'PropertiesGroup',
+        properties: properties
+      }]
+    }
+    return []
   }
   
   // UserStory has no children
@@ -153,12 +187,38 @@ const children = computed(() => {
     return []
   }
   
-  // ReadModel children (properties)
-  if (type === 'ReadModel') {
+  // PropertiesGroup - shows actual properties when expanded
+  if (type === 'PropertiesGroup') {
     return (props.node.properties || []).map(p => ({
       ...p,
       type: 'Property'
     }))
+  }
+  
+  // ReadModel children (operations and properties group)
+  if (type === 'ReadModel') {
+    const result = []
+    
+    // CQRS Operations
+    const operations = (props.node.operations || []).map(op => ({
+      ...op,
+      type: 'CQRSOperation',
+      name: `${op.operationType} ← ${op.triggerEventName || op.triggerEventId}`
+    }))
+    result.push(...operations)
+    
+    // Properties group
+    const properties = props.node.properties || []
+    if (properties.length > 0) {
+      result.push({
+        id: `${props.node.id}-props`,
+        name: `Properties (${properties.length})`,
+        type: 'PropertiesGroup',
+        properties: properties
+      })
+    }
+    
+    return result
   }
   
   return []
@@ -235,7 +295,7 @@ async function addToCanvas() {
       class="tree-node__header"
       :class="{ 'is-dragging': isDragging, 'is-on-canvas': isOnCanvas, 'is-newly-added': isNewlyAdded }"
       :style="{ paddingLeft: `${depth * 12}px` }"
-      :draggable="true"
+      :draggable="node.type !== 'PropertiesGroup' && node.type !== 'Property'"
       @click="toggleExpand"
       @dblclick="handleDoubleClick"
       @dragstart="handleDragStart"

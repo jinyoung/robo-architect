@@ -272,6 +272,97 @@ MATCH (cmd:Command {id: "CMD-CANCEL-ORDER"})
 CREATE (ui)-[:ATTACHED_TO]->(cmd);
 
 
+// ############################################################
+// 15. HAS_CQRS
+// ############################################################
+// 방향: ReadModel → CQRSConfig
+// 의미: ReadModel의 CQRS 설정 연결
+// ############################################################
+
+// Example:
+// MATCH (rm:ReadModel {id: "RM-MYPAGE-ORDER-STATUS"})
+// MATCH (cqrs:CQRSConfig {id: "CQRS-RM-MYPAGE-ORDER-STATUS"})
+// CREATE (rm)-[:HAS_CQRS]->(cqrs);
+
+
+// ############################################################
+// 16. HAS_OPERATION
+// ############################################################
+// 방향: CQRSConfig → CQRSOperation
+// 의미: CQRS 설정이 포함하는 작업 (INSERT/UPDATE/DELETE)
+// ############################################################
+
+// Example:
+// MATCH (cqrs:CQRSConfig {id: "CQRS-RM-MYPAGE-ORDER-STATUS"})
+// MATCH (op:CQRSOperation {id: "CQRS-OP-RM-MYPAGE-INSERT-ORDERPLACED"})
+// CREATE (cqrs)-[:HAS_OPERATION]->(op);
+
+
+// ############################################################
+// 17. TRIGGERED_BY
+// ############################################################
+// 방향: CQRSOperation → Event
+// 의미: 이 작업을 트리거하는 이벤트
+// ############################################################
+
+// Example:
+// MATCH (op:CQRSOperation {id: "CQRS-OP-RM-MYPAGE-INSERT-ORDERPLACED"})
+// MATCH (evt:Event {id: "EVT-ORDER-PLACED"})
+// CREATE (op)-[:TRIGGERED_BY]->(evt);
+
+
+// ############################################################
+// 18. HAS_MAPPING
+// ############################################################
+// 방향: CQRSOperation → CQRSMapping
+// 의미: 작업에 포함된 필드 매핑
+// ############################################################
+
+// Example:
+// MATCH (op:CQRSOperation {id: "CQRS-OP-RM-MYPAGE-INSERT-ORDERPLACED"})
+// MATCH (m:CQRSMapping {id: "CQRS-MAP-RM-MYPAGE-ORDERID"})
+// CREATE (op)-[:HAS_MAPPING]->(m);
+
+
+// ############################################################
+// 19. HAS_WHERE
+// ############################################################
+// 방향: CQRSOperation → CQRSWhere
+// 의미: UPDATE/DELETE 작업의 조건절
+// ############################################################
+
+// Example:
+// MATCH (op:CQRSOperation {id: "CQRS-OP-RM-MYPAGE-UPDATE-DELIVERYSTARTED"})
+// MATCH (w:CQRSWhere {id: "CQRS-WHERE-RM-MYPAGE-UPDATE-ORDERID"})
+// CREATE (op)-[:HAS_WHERE]->(w);
+
+
+// ############################################################
+// 20. SOURCE (for CQRSMapping)
+// ############################################################
+// 방향: CQRSMapping → Property (Event의 속성)
+// 의미: 매핑의 소스 필드 (이벤트에서 가져올 값)
+// ############################################################
+
+// Example:
+// MATCH (m:CQRSMapping {id: "CQRS-MAP-RM-MYPAGE-ORDERID"})
+// MATCH (prop:Property {id: "PROP-EVT-ORDER-ID"})
+// CREATE (m)-[:SOURCE]->(prop);
+
+
+// ############################################################
+// 21. TARGET (for CQRSMapping and CQRSWhere)
+// ############################################################
+// 방향: CQRSMapping/CQRSWhere → Property (ReadModel의 속성)
+// 의미: 매핑의 타겟 필드 또는 WHERE 조건의 비교 필드
+// ############################################################
+
+// Example:
+// MATCH (m:CQRSMapping {id: "CQRS-MAP-RM-MYPAGE-ORDERID"})
+// MATCH (prop:Property {id: "PROP-RM-MYPAGE-ORDERID"})
+// CREATE (m)-[:TARGET]->(prop);
+
+
 // ============================================================
 // Event Storming Flow 시각화
 // ============================================================

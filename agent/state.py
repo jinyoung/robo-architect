@@ -334,8 +334,12 @@ def format_user_story(us: Dict[str, Any]) -> str:
     role = us.get("role", "user")
     action = us.get("action", "do something")
     benefit = us.get("benefit", "")
+    ui_description = us.get("uiDescription", "") or us.get("ui_description", "")
+    
     text = f"As a {role}, I want to {action}"
     if benefit:
         text += f", so that {benefit}"
+    if ui_description:
+        text += f"\n[UI 요구사항]: {ui_description}"
     return text
 

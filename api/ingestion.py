@@ -89,6 +89,7 @@ class IngestionPhase(str, Enum):
     EXTRACTING_AGGREGATES = "extracting_aggregates"
     EXTRACTING_COMMANDS = "extracting_commands"
     EXTRACTING_READMODELS = "extracting_readmodels"
+    GENERATING_UI = "generating_ui"
     EXTRACTING_EVENTS = "extracting_events"
     IDENTIFYING_POLICIES = "identifying_policies"
     GENERATING_PROPERTIES = "generating_properties"
@@ -233,6 +234,13 @@ EXTRACT_USER_STORIES_PROMPT = """분석할 요구사항 문서:
 5. 이점(benefit)은 비즈니스 가치 설명
 6. 우선순위는 핵심 기능은 high, 부가 기능은 medium, 선택 기능은 low
 
+★ UI 요구사항 처리 (중요):
+- 요구사항에 "UI:", "화면", "인터페이스", "폼", "페이지" 등 UI 관련 설명이 있으면
+  해당 설명을 ui_description 필드에 저장하세요.
+- 예시: ui_description="주문 화면에서 상품명, 수량, 배송지 주소를 입력하고 '주문하기' 버튼을 클릭한다"
+- UI 설명이 있는 User Story는 나중에 UI 스티커(와이어프레임) 생성에 사용됩니다.
+- UI 설명이 없으면 ui_description은 빈 문자열로 두세요.
+
 User Story ID는 US-001, US-002 형식으로 순차적으로 부여하세요.
 모든 주요 기능을 빠짐없이 User Story로 추출하세요.
 """
@@ -245,6 +253,7 @@ class GeneratedUserStory(BaseModel):
     action: str
     benefit: str
     priority: str = "medium"
+    ui_description: str = ""  # UI 관련 설명 (화면, 인터페이스 등)
 
 
 class UserStoryList(BaseModel):
@@ -318,7 +327,8 @@ async def run_ingestion_workflow(
                     action=us.action,
                     benefit=us.benefit,
                     priority=us.priority,
-                    status="draft"
+                    status="draft",
+                    ui_description=us.ui_description if hasattr(us, 'ui_description') else None
                 )
                 
                 # Emit event for each User Story created
@@ -335,7 +345,8 @@ async def run_ingestion_workflow(
                             "role": us.role,
                             "action": us.action,
                             "benefit": us.benefit,
-                            "priority": us.priority
+                            "priority": us.priority,
+                            "uiDescription": us.ui_description if hasattr(us, 'ui_description') else ""
                         }
                     }
                 )
@@ -721,6 +732,216 @@ async def run_ingestion_workflow(
                 phase=IngestionPhase.PAUSED,
                 message="⏸️ 일시 정지됨 - ReadModel 추출 완료",
                 progress=72
+            )
+            await wait_if_paused(session)
+        
+        # Phase 6.5: Generate UI Stickers
+        yield ProgressEvent(
+            phase=IngestionPhase.GENERATING_UI,
+            message="UI 스티커 생성 중...",
+            progress=73
+        )
+        
+        from agent.prompts import GENERATE_UI_PROMPT
+        from agent.state import UICandidate, format_user_story
+        
+        all_uis = {}
+        ui_keywords = ["화면", "UI", "페이지", "폼", "입력", "표시", "보여", "조회", "view", "screen", "form", "display"]
+        
+        for bc in bc_candidates:
+            bc_id = bc.id
+            bc_id_short = bc.id.replace("BC-", "")
+            bc_name = bc.name
+            bc_uis = []
+            
+            # Get user stories for this BC that have UI descriptions
+            bc_story_ids = bc.user_story_ids if hasattr(bc, 'user_story_ids') and bc.user_story_ids else []
+            bc_stories = [us for us in user_stories if us.id in bc_story_ids]
+            
+            for us in bc_stories:
+                # Check if user story has UI requirements
+                ui_desc = us.ui_description if hasattr(us, 'ui_description') else ""
+                story_text = f"{us.action} {us.benefit} {ui_desc}".lower()
+                has_ui = bool(ui_desc) or any(kw.lower() in story_text for kw in ui_keywords)
+                
+                if not has_ui:
+                    continue
+                
+                us_id = us.id
+                
+                # Find Commands that implement this user story
+                for agg in all_aggregates.get(bc_id, []):
+                    for cmd in all_commands.get(agg.id, []):
+                        cmd_story_ids = cmd.user_story_ids if hasattr(cmd, 'user_story_ids') and cmd.user_story_ids else []
+                        if us_id not in cmd_story_ids:
+                            continue
+                        
+                        ui_id = f"UI-{bc_id_short}-{cmd.name.upper().replace(' ', '-')}"
+                        
+                        # Skip if already generated
+                        if any(u.get('id') == ui_id for u in bc_uis):
+                            continue
+                        
+                        # Prepare context for UI generation
+                        user_story_text = f"As a {us.role}, I want to {us.action}"
+                        if us.benefit:
+                            user_story_text += f", so that {us.benefit}"
+                        if ui_desc:
+                            user_story_text += f"\n[UI 요구사항]: {ui_desc}"
+                        
+                        prompt = GENERATE_UI_PROMPT.format(
+                            target_type="Command",
+                            target_name=cmd.name,
+                            target_id=cmd.id,
+                            bc_name=bc_name,
+                            description=cmd.description if hasattr(cmd, 'description') else "",
+                            user_story=user_story_text,
+                            properties="",
+                            aggregate_info=f"{agg.name}"
+                        )
+                        
+                        try:
+                            structured_llm = llm.with_structured_output(UICandidate)
+                            ui_response = structured_llm.invoke([
+                                SystemMessage(content=SYSTEM_PROMPT),
+                                HumanMessage(content=prompt)
+                            ])
+                            
+                            # Create UI in Neo4j
+                            client.create_ui(
+                                id=ui_id,
+                                name=ui_response.name if hasattr(ui_response, 'name') else f"{cmd.name} UI",
+                                bc_id=bc_id,
+                                attached_to_id=cmd.id,
+                                attached_to_type="Command",
+                                template=ui_response.template if hasattr(ui_response, 'template') else ""
+                            )
+                            
+                            ui_data = {
+                                "id": ui_id,
+                                "name": ui_response.name if hasattr(ui_response, 'name') else f"{cmd.name} UI",
+                                "attachedToId": cmd.id,
+                                "attachedToType": "Command",
+                                "template": ui_response.template if hasattr(ui_response, 'template') else ""
+                            }
+                            bc_uis.append(ui_data)
+                            
+                            yield ProgressEvent(
+                                phase=IngestionPhase.GENERATING_UI,
+                                message=f"UI 스티커 생성: {ui_data['name']}",
+                                progress=74,
+                                data={
+                                    "type": "UI",
+                                    "object": {
+                                        "id": ui_id,
+                                        "name": ui_data['name'],
+                                        "type": "UI",
+                                        "parentId": bc_id,
+                                        "attachedToId": cmd.id,
+                                        "attachedToType": "Command"
+                                    }
+                                }
+                            )
+                            await asyncio.sleep(0.15)
+                            
+                        except Exception as e:
+                            print(f"Failed to generate UI for {cmd.name}: {e}")
+                            continue
+                
+                # Find ReadModels that implement this user story
+                for rm in all_readmodels.get(bc_id, []):
+                    rm_story_ids = rm.user_story_ids if hasattr(rm, 'user_story_ids') and rm.user_story_ids else []
+                    if us_id not in rm_story_ids:
+                        continue
+                    
+                    ui_id = f"UI-{bc_id_short}-{rm.name.upper().replace(' ', '-')}"
+                    
+                    # Skip if already generated
+                    if any(u.get('id') == ui_id for u in bc_uis):
+                        continue
+                    
+                    # Prepare context for UI generation
+                    user_story_text = f"As a {us.role}, I want to {us.action}"
+                    if us.benefit:
+                        user_story_text += f", so that {us.benefit}"
+                    if ui_desc:
+                        user_story_text += f"\n[UI 요구사항]: {ui_desc}"
+                    
+                    prompt = GENERATE_UI_PROMPT.format(
+                        target_type="ReadModel",
+                        target_name=rm.name,
+                        target_id=rm.id,
+                        bc_name=bc_name,
+                        description=rm.description if hasattr(rm, 'description') else "",
+                        user_story=user_story_text,
+                        properties="",
+                        aggregate_info="N/A (ReadModel)"
+                    )
+                    
+                    try:
+                        structured_llm = llm.with_structured_output(UICandidate)
+                        ui_response = structured_llm.invoke([
+                            SystemMessage(content=SYSTEM_PROMPT),
+                            HumanMessage(content=prompt)
+                        ])
+                        
+                        # Create UI in Neo4j
+                        client.create_ui(
+                            id=ui_id,
+                            name=ui_response.name if hasattr(ui_response, 'name') else f"{rm.name} UI",
+                            bc_id=bc_id,
+                            attached_to_id=rm.id,
+                            attached_to_type="ReadModel",
+                            template=ui_response.template if hasattr(ui_response, 'template') else ""
+                        )
+                        
+                        ui_data = {
+                            "id": ui_id,
+                            "name": ui_response.name if hasattr(ui_response, 'name') else f"{rm.name} UI",
+                            "attachedToId": rm.id,
+                            "attachedToType": "ReadModel",
+                            "template": ui_response.template if hasattr(ui_response, 'template') else ""
+                        }
+                        bc_uis.append(ui_data)
+                        
+                        yield ProgressEvent(
+                            phase=IngestionPhase.GENERATING_UI,
+                            message=f"UI 스티커 생성: {ui_data['name']}",
+                            progress=74,
+                            data={
+                                "type": "UI",
+                                "object": {
+                                    "id": ui_id,
+                                    "name": ui_data['name'],
+                                    "type": "UI",
+                                    "parentId": bc_id,
+                                    "attachedToId": rm.id,
+                                    "attachedToType": "ReadModel"
+                                }
+                            }
+                        )
+                        await asyncio.sleep(0.15)
+                        
+                    except Exception as e:
+                        print(f"Failed to generate UI for {rm.name}: {e}")
+                        continue
+            
+            if bc_uis:
+                all_uis[bc_id] = bc_uis
+        
+        ui_count = sum(len(uis) for uis in all_uis.values())
+        yield ProgressEvent(
+            phase=IngestionPhase.GENERATING_UI,
+            message=f"{ui_count}개 UI 스티커 생성 완료",
+            progress=75
+        )
+        
+        # Check for pause after UI generation
+        if session.is_paused:
+            yield ProgressEvent(
+                phase=IngestionPhase.PAUSED,
+                message="⏸️ 일시 정지됨 - UI 스티커 생성 완료",
+                progress=75
             )
             await wait_if_paused(session)
         
@@ -1264,6 +1485,68 @@ async def run_ingestion_workflow(
                     except Exception:
                         pass
         
+        # Phase 9: Create CQRS Operations for ReadModels
+        yield ProgressEvent(
+            phase=IngestionPhase.GENERATING_PROPERTIES,
+            message="CQRS 오퍼레이션 생성 중...",
+            progress=99
+        )
+        
+        cqrs_operation_count = 0
+        
+        for bc in bc_candidates:
+            readmodels = all_readmodels.get(bc.id, [])
+            
+            for rm in readmodels:
+                # Skip if no source events defined
+                if not rm.source_event_ids:
+                    continue
+                
+                # Create CQRSConfig for this ReadModel
+                try:
+                    cqrs_config = client.create_cqrs_config(rm.id)
+                    if not cqrs_config or not cqrs_config.get('id'):
+                        continue
+                    
+                    cqrs_config_id = cqrs_config['id']
+                    
+                    # Create INSERT operations for each source event
+                    for event_id in rm.source_event_ids:
+                        # Determine operation type (first event = INSERT, rest = UPDATE)
+                        op_type = "INSERT" if event_id == rm.source_event_ids[0] else "UPDATE"
+                        
+                        try:
+                            operation = client.create_cqrs_operation(
+                                cqrs_config_id=cqrs_config_id,
+                                operation_type=op_type,
+                                trigger_event_id=event_id
+                            )
+                            
+                            if operation and operation.get('id'):
+                                cqrs_operation_count += 1
+                                
+                                yield ProgressEvent(
+                                    phase=IngestionPhase.GENERATING_PROPERTIES,
+                                    message=f"CQRS Operation: {rm.name} ← {event_id}",
+                                    progress=99,
+                                    data={
+                                        "type": "CQRSOperation",
+                                        "object": {
+                                            "id": operation['id'],
+                                            "operationType": op_type,
+                                            "triggerEventId": event_id,
+                                            "parentId": rm.id,
+                                            "type": "CQRSOperation"
+                                        }
+                                    }
+                                )
+                                await asyncio.sleep(0.05)
+                        except Exception as e:
+                            print(f"[CQRS] Error creating operation for {rm.id}: {e}")
+                            
+                except Exception as e:
+                    print(f"[CQRS] Error creating config for {rm.id}: {e}")
+        
         # Complete
         yield ProgressEvent(
             phase=IngestionPhase.COMPLETE,
@@ -1276,9 +1559,11 @@ async def run_ingestion_workflow(
                     "aggregates": sum(len(aggs) for aggs in all_aggregates.values()),
                     "commands": sum(len(cmds) for cmds in all_commands.values()),
                     "readmodels": sum(len(rms) for rms in all_readmodels.values()),
+                    "uis": sum(len(uis) for uis in all_uis.values()),
                     "events": sum(len(evts) for evts in all_events.values()),
                     "policies": len(policies),
-                    "properties": property_count
+                    "properties": property_count,
+                    "cqrs_operations": cqrs_operation_count
                 }
             }
         )
@@ -1346,12 +1631,52 @@ async def upload_document(
     }
 
 
+@router.get("/session/{session_id}/status")
+async def get_session_status(session_id: str) -> dict[str, Any]:
+    """
+    Get the current status of an ingestion session.
+    Used for page refresh recovery - checks if session is still active.
+    """
+    session = get_session(session_id)
+    
+    if not session:
+        return {
+            "active": False,
+            "reason": "Session not found or expired"
+        }
+    
+    # Check if session is complete or errored
+    if session.status == IngestionPhase.COMPLETE:
+        return {
+            "active": False,
+            "reason": "Session completed"
+        }
+    
+    if session.status == IngestionPhase.ERROR:
+        return {
+            "active": False,
+            "reason": "Session has error"
+        }
+    
+    # Session is still active
+    last_event = session.events[-1] if session.events else None
+    
+    return {
+        "active": True,
+        "phase": session.status.value if session.status else "processing",
+        "message": last_event.message if last_event else "Processing...",
+        "progress": last_event.progress if last_event else 0,
+        "isPaused": session.is_paused
+    }
+
+
 @router.get("/stream/{session_id}")
-async def stream_progress(session_id: str):
+async def stream_progress(session_id: str, reconnect: bool = False):
     """
     SSE endpoint for streaming ingestion progress.
     
     Client should connect after receiving session_id from /upload.
+    If reconnect=true, will first replay all stored events before continuing.
     """
     session = get_session(session_id)
     
@@ -1359,16 +1684,30 @@ async def stream_progress(session_id: str):
         raise HTTPException(status_code=404, detail="Session not found")
     
     async def event_generator():
-        async for event in run_ingestion_workflow(session, session.content):
-            add_event(session, event)
-            yield {
-                "event": "progress",
-                "data": event.model_dump_json()
-            }
+        # If reconnecting, first replay all stored events
+        if reconnect and session.events:
+            for stored_event in session.events:
+                yield {
+                    "event": "progress",
+                    "data": stored_event.model_dump_json() if hasattr(stored_event, 'model_dump_json') else json.dumps(stored_event)
+                }
+                await asyncio.sleep(0.01)  # Small delay to not overwhelm client
+            
+            # If session is already complete or errored, don't run workflow again
+            if session.status in (IngestionPhase.COMPLETE, IngestionPhase.ERROR):
+                return
         
-        # Clean up session after completion
-        if session_id in _sessions:
-            del _sessions[session_id]
+        # Run the workflow (or continue from where it left off)
+        if session.status not in (IngestionPhase.COMPLETE, IngestionPhase.ERROR):
+            async for event in run_ingestion_workflow(session, session.content):
+                add_event(session, event)
+                yield {
+                    "event": "progress",
+                    "data": event.model_dump_json()
+                }
+        
+        # Don't delete session immediately - keep for potential reconnection
+        # Session will expire naturally via the status check timeout
     
     return EventSourceResponse(event_generator())
 

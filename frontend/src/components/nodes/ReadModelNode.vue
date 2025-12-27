@@ -1,5 +1,5 @@
 <script setup>
-import { computed, ref } from 'vue'
+import { computed, ref, inject } from 'vue'
 import { Handle, Position } from '@vue-flow/core'
 import { useTerminologyStore } from '../../stores/terminology'
 
@@ -8,7 +8,8 @@ const props = defineProps({
   data: Object
 })
 
-const emit = defineEmits(['openCqrsConfig'])
+// Inject the modal handler from RightPanel
+const openCqrsConfigModal = inject('openCqrsConfigModal', null)
 
 const terminologyStore = useTerminologyStore()
 const headerText = computed(() => `<< ${terminologyStore.getTerm('ReadModel')} >>`)
@@ -35,7 +36,9 @@ function toggleProperties(e) {
 
 function openCqrsConfig(e) {
   e.stopPropagation()
-  emit('openCqrsConfig', props.id, props.data)
+  if (openCqrsConfigModal) {
+    openCqrsConfigModal(props.id, props.data)
+  }
 }
 </script>
 

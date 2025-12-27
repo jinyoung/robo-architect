@@ -629,9 +629,10 @@ def generate_ui_node(state: EventStormingState) -> Dict[str, Any]:
         ui_keywords = ["화면", "UI", "페이지", "폼", "입력", "표시", "보여", "조회", "view", "screen", "form", "display"]
 
         for us in bc_stories:
-            # Check if user story mentions UI
-            story_text = f"{us.get('action', '')} {us.get('benefit', '')}".lower()
-            has_ui_mention = any(kw.lower() in story_text for kw in ui_keywords)
+            # Check if user story has explicit UI description or mentions UI keywords
+            ui_description = us.get('uiDescription', '') or us.get('ui_description', '')
+            story_text = f"{us.get('action', '')} {us.get('benefit', '')} {ui_description}".lower()
+            has_ui_mention = bool(ui_description) or any(kw.lower() in story_text for kw in ui_keywords)
 
             if not has_ui_mention:
                 continue

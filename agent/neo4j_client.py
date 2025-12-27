@@ -121,6 +121,7 @@ class Neo4jClient:
         benefit: str | None = None,
         priority: str = "medium",
         status: str = "draft",
+        ui_description: str | None = None,
     ) -> dict[str, Any]:
         """Create a new user story."""
         query = """
@@ -130,9 +131,10 @@ class Neo4jClient:
             action: $action,
             benefit: $benefit,
             priority: $priority,
-            status: $status
+            status: $status,
+            uiDescription: $ui_description
         })
-        RETURN us {.id, .role, .action, .benefit, .priority, .status} as user_story
+        RETURN us {.id, .role, .action, .benefit, .priority, .status, .uiDescription} as user_story
         """
         with self.session() as session:
             result = session.run(
@@ -143,6 +145,7 @@ class Neo4jClient:
                 benefit=benefit,
                 priority=priority,
                 status=status,
+                ui_description=ui_description or "",
             )
             return dict(result.single()["user_story"])
 
@@ -786,6 +789,326 @@ class Neo4jClient:
         with self.session() as session:
             result = session.run(query, ui_id=ui_id, template=template)
             return result.single() is not None
+
+    # =========================================================================
+    # CQRS Configuration Graph (CQRSConfig, CQRSOperation, CQRSMapping, CQRSWhere)
+    # =========================================================================
+
+    def create_cqrs_config(self, readmodel_id: str) -> dict[str, Any]:
+        """
+        Create a CQRSConfig node and link it to a ReadModel.
+        
+        Returns the created CQRSConfig.
+        """
+        cqrs_id = f"CQRS-{readmodel_id}"
+        query = """
+        MATCH (rm:ReadModel {id: $readmodel_id})
+        MERGE (cqrs:CQRSConfig {id: $cqrs_id})
+        SET cqrs.readmodelId = $readmodel_id
+        MERGE (rm)-[:HAS_CQRS]->(cqrs)
+        RETURN cqrs {.id, .readmodelId} as config
+        """
+        with self.session() as session:
+            result = session.run(query, readmodel_id=readmodel_id, cqrs_id=cqrs_id)
+            record = result.single()
+            return dict(record["config"]) if record else {}
+
+    def get_cqrs_config(self, readmodel_id: str) -> dict[str, Any]:
+        """
+        Get the full CQRS configuration for a ReadModel, including all operations,
+        mappings, and where conditions.
+        """
+        query = """
+        MATCH (rm:ReadModel {id: $readmodel_id})-[:HAS_CQRS]->(cqrs:CQRSConfig)
+        OPTIONAL MATCH (cqrs)-[:HAS_OPERATION]->(op:CQRSOperation)
+        OPTIONAL MATCH (op)-[:TRIGGERED_BY]->(evt:Event)
+        OPTIONAL MATCH (op)-[:HAS_MAPPING]->(m:CQRSMapping)
+        OPTIONAL MATCH (m)-[:SOURCE]->(srcProp:Property)
+        OPTIONAL MATCH (m)-[:TARGET]->(tgtProp:Property)
+        OPTIONAL MATCH (op)-[:HAS_WHERE]->(w:CQRSWhere)
+        OPTIONAL MATCH (w)-[:TARGET]->(whereTgtProp:Property)
+        OPTIONAL MATCH (w)-[:SOURCE_EVENT_FIELD]->(whereSrcProp:Property)
+        WITH cqrs, op, evt, 
+             collect(DISTINCT {
+                 id: m.id,
+                 sourceType: m.sourceType,
+                 staticValue: m.staticValue,
+                 sourcePropertyId: srcProp.id,
+                 sourcePropertyName: srcProp.name,
+                 targetPropertyId: tgtProp.id,
+                 targetPropertyName: tgtProp.name
+             }) as mappings,
+             collect(DISTINCT {
+                 id: w.id,
+                 operator: w.operator,
+                 targetPropertyId: whereTgtProp.id,
+                 targetPropertyName: whereTgtProp.name,
+                 sourceEventFieldId: whereSrcProp.id,
+                 sourceEventFieldName: whereSrcProp.name
+             }) as whereConditions
+        WITH cqrs, collect(DISTINCT {
+            id: op.id,
+            operationType: op.operationType,
+            triggerEventId: evt.id,
+            triggerEventName: evt.name,
+            mappings: mappings,
+            whereConditions: whereConditions
+        }) as operations
+        RETURN {
+            id: cqrs.id,
+            readmodelId: cqrs.readmodelId,
+            operations: operations
+        } as config
+        """
+        with self.session() as session:
+            result = session.run(query, readmodel_id=readmodel_id)
+            record = result.single()
+            if not record:
+                return {}
+            config = dict(record["config"])
+            # Filter out null operations
+            if config.get("operations"):
+                config["operations"] = [
+                    op for op in config["operations"]
+                    if op.get("id") is not None
+                ]
+                # Filter out null mappings/whereConditions in each operation
+                for op in config["operations"]:
+                    if op.get("mappings"):
+                        op["mappings"] = [m for m in op["mappings"] if m.get("id") is not None]
+                    if op.get("whereConditions"):
+                        op["whereConditions"] = [w for w in op["whereConditions"] if w.get("id") is not None]
+            return config
+
+    def delete_cqrs_config(self, readmodel_id: str) -> bool:
+        """
+        Delete a CQRSConfig and all related operations, mappings, and where conditions.
+        """
+        query = """
+        MATCH (rm:ReadModel {id: $readmodel_id})-[:HAS_CQRS]->(cqrs:CQRSConfig)
+        OPTIONAL MATCH (cqrs)-[:HAS_OPERATION]->(op:CQRSOperation)
+        OPTIONAL MATCH (op)-[:HAS_MAPPING]->(m:CQRSMapping)
+        OPTIONAL MATCH (op)-[:HAS_WHERE]->(w:CQRSWhere)
+        DETACH DELETE cqrs, op, m, w
+        RETURN count(cqrs) as deleted
+        """
+        with self.session() as session:
+            result = session.run(query, readmodel_id=readmodel_id)
+            record = result.single()
+            return record["deleted"] > 0 if record else False
+
+    def create_cqrs_operation(
+        self,
+        cqrs_config_id: str,
+        operation_type: str,
+        trigger_event_id: str,
+    ) -> dict[str, Any]:
+        """
+        Create a CQRSOperation node and link it to a CQRSConfig and trigger Event.
+        
+        operation_type: "INSERT", "UPDATE", or "DELETE"
+        """
+        # Generate a unique operation ID
+        op_id = f"CQRS-OP-{cqrs_config_id.replace('CQRS-', '')}-{operation_type}-{trigger_event_id.replace('EVT-', '')}"
+        query = """
+        MATCH (cqrs:CQRSConfig {id: $cqrs_config_id})
+        MATCH (evt:Event {id: $trigger_event_id})
+        MERGE (op:CQRSOperation {id: $op_id})
+        SET op.operationType = $operation_type,
+            op.cqrsConfigId = $cqrs_config_id,
+            op.triggerEventId = $trigger_event_id
+        MERGE (cqrs)-[:HAS_OPERATION]->(op)
+        MERGE (op)-[:TRIGGERED_BY]->(evt)
+        RETURN op {.id, .operationType, .cqrsConfigId, .triggerEventId} as operation
+        """
+        with self.session() as session:
+            result = session.run(
+                query,
+                cqrs_config_id=cqrs_config_id,
+                op_id=op_id,
+                operation_type=operation_type,
+                trigger_event_id=trigger_event_id,
+            )
+            record = result.single()
+            return dict(record["operation"]) if record else {}
+
+    def delete_cqrs_operation(self, operation_id: str) -> bool:
+        """
+        Delete a CQRSOperation and all its mappings and where conditions.
+        """
+        query = """
+        MATCH (op:CQRSOperation {id: $operation_id})
+        OPTIONAL MATCH (op)-[:HAS_MAPPING]->(m:CQRSMapping)
+        OPTIONAL MATCH (op)-[:HAS_WHERE]->(w:CQRSWhere)
+        DETACH DELETE op, m, w
+        RETURN count(op) as deleted
+        """
+        with self.session() as session:
+            result = session.run(query, operation_id=operation_id)
+            record = result.single()
+            return record["deleted"] > 0 if record else False
+
+    def create_cqrs_mapping(
+        self,
+        operation_id: str,
+        target_property_id: str,
+        source_property_id: str | None = None,
+        source_type: str = "event",
+        static_value: str | None = None,
+    ) -> dict[str, Any]:
+        """
+        Create a CQRSMapping node for field mapping in a CQRS operation.
+        
+        source_type: "event" (use source_property_id) or "value" (use static_value)
+        """
+        # Generate a unique mapping ID
+        import uuid
+        mapping_id = f"CQRS-MAP-{uuid.uuid4().hex[:8]}"
+        
+        if source_type == "event" and source_property_id:
+            query = """
+            MATCH (op:CQRSOperation {id: $operation_id})
+            MATCH (srcProp:Property {id: $source_property_id})
+            MATCH (tgtProp:Property {id: $target_property_id})
+            MERGE (m:CQRSMapping {id: $mapping_id})
+            SET m.operationId = $operation_id,
+                m.sourceType = $source_type,
+                m.staticValue = null
+            MERGE (op)-[:HAS_MAPPING]->(m)
+            MERGE (m)-[:SOURCE]->(srcProp)
+            MERGE (m)-[:TARGET]->(tgtProp)
+            RETURN m {.id, .operationId, .sourceType} as mapping
+            """
+            params = {
+                "operation_id": operation_id,
+                "mapping_id": mapping_id,
+                "source_property_id": source_property_id,
+                "target_property_id": target_property_id,
+                "source_type": source_type,
+            }
+        else:
+            # Static value mapping
+            query = """
+            MATCH (op:CQRSOperation {id: $operation_id})
+            MATCH (tgtProp:Property {id: $target_property_id})
+            MERGE (m:CQRSMapping {id: $mapping_id})
+            SET m.operationId = $operation_id,
+                m.sourceType = $source_type,
+                m.staticValue = $static_value
+            MERGE (op)-[:HAS_MAPPING]->(m)
+            MERGE (m)-[:TARGET]->(tgtProp)
+            RETURN m {.id, .operationId, .sourceType, .staticValue} as mapping
+            """
+            params = {
+                "operation_id": operation_id,
+                "mapping_id": mapping_id,
+                "target_property_id": target_property_id,
+                "source_type": source_type,
+                "static_value": static_value,
+            }
+        
+        with self.session() as session:
+            result = session.run(query, **params)
+            record = result.single()
+            return dict(record["mapping"]) if record else {}
+
+    def delete_cqrs_mapping(self, mapping_id: str) -> bool:
+        """Delete a CQRSMapping node."""
+        query = """
+        MATCH (m:CQRSMapping {id: $mapping_id})
+        DETACH DELETE m
+        RETURN count(m) as deleted
+        """
+        with self.session() as session:
+            result = session.run(query, mapping_id=mapping_id)
+            record = result.single()
+            return record["deleted"] > 0 if record else False
+
+    def create_cqrs_where(
+        self,
+        operation_id: str,
+        target_property_id: str,
+        source_event_field_id: str,
+        operator: str = "=",
+    ) -> dict[str, Any]:
+        """
+        Create a CQRSWhere node for UPDATE/DELETE conditions.
+        
+        operator: "=", "!=", ">", "<", ">=", "<="
+        """
+        import uuid
+        where_id = f"CQRS-WHERE-{uuid.uuid4().hex[:8]}"
+        
+        query = """
+        MATCH (op:CQRSOperation {id: $operation_id})
+        MATCH (tgtProp:Property {id: $target_property_id})
+        MATCH (srcProp:Property {id: $source_event_field_id})
+        MERGE (w:CQRSWhere {id: $where_id})
+        SET w.operationId = $operation_id,
+            w.operator = $operator
+        MERGE (op)-[:HAS_WHERE]->(w)
+        MERGE (w)-[:TARGET]->(tgtProp)
+        MERGE (w)-[:SOURCE_EVENT_FIELD]->(srcProp)
+        RETURN w {.id, .operationId, .operator} as whereCondition
+        """
+        with self.session() as session:
+            result = session.run(
+                query,
+                operation_id=operation_id,
+                where_id=where_id,
+                target_property_id=target_property_id,
+                source_event_field_id=source_event_field_id,
+                operator=operator,
+            )
+            record = result.single()
+            return dict(record["whereCondition"]) if record else {}
+
+    def delete_cqrs_where(self, where_id: str) -> bool:
+        """Delete a CQRSWhere node."""
+        query = """
+        MATCH (w:CQRSWhere {id: $where_id})
+        DETACH DELETE w
+        RETURN count(w) as deleted
+        """
+        with self.session() as session:
+            result = session.run(query, where_id=where_id)
+            record = result.single()
+            return record["deleted"] > 0 if record else False
+
+    def get_events_for_cqrs(self, readmodel_id: str) -> list[dict[str, Any]]:
+        """
+        Get all available events that can be used for CQRS configuration.
+        This includes events from all Bounded Contexts.
+        """
+        query = """
+        MATCH (bc:BoundedContext)-[:HAS_AGGREGATE]->(agg:Aggregate)-[:HAS_COMMAND]->(cmd:Command)-[:EMITS]->(evt:Event)
+        OPTIONAL MATCH (evt)-[:HAS_PROPERTY]->(prop:Property)
+        WITH bc, evt, collect(DISTINCT prop {.id, .name, .type}) as properties
+        RETURN {
+            id: evt.id,
+            name: evt.name,
+            bcId: bc.id,
+            bcName: bc.name,
+            properties: properties
+        } as event
+        ORDER BY bc.name, evt.name
+        """
+        with self.session() as session:
+            result = session.run(query)
+            return [dict(record["event"]) for record in result]
+
+    def get_readmodel_properties(self, readmodel_id: str) -> list[dict[str, Any]]:
+        """
+        Get all properties of a ReadModel for CQRS mapping configuration.
+        """
+        query = """
+        MATCH (rm:ReadModel {id: $readmodel_id})-[:HAS_PROPERTY]->(prop:Property)
+        RETURN prop {.id, .name, .type, .isRequired} as property
+        ORDER BY prop.name
+        """
+        with self.session() as session:
+            result = session.run(query, readmodel_id=readmodel_id)
+            return [dict(record["property"]) for record in result]
 
     # =========================================================================
     # Graph Traversal & Analysis

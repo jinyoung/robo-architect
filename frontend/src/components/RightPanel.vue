@@ -1,5 +1,5 @@
 <script setup>
-import { ref, computed, defineAsyncComponent, h, compile } from 'vue'
+import { ref, computed, defineAsyncComponent, h, compile, provide } from 'vue'
 import { VueFlow, useVueFlow } from '@vue-flow/core'
 import { Background } from '@vue-flow/background'
 import { Controls } from '@vue-flow/controls'
@@ -15,6 +15,9 @@ import ReadModelNode from './nodes/ReadModelNode.vue'
 import BoundedContextNode from './nodes/BoundedContextNode.vue'
 import UINode from './nodes/UINode.vue'
 
+// Modals
+import ReadModelCQRSConfigModal from './ReadModelCQRSConfigModal.vue'
+
 // Chat Panel
 import ChatPanel from './ChatPanel.vue'
 
@@ -26,6 +29,11 @@ const isChatPanelOpen = ref(true)
 // UI Preview state
 const isUIPreviewOpen = ref(false)
 const previewingUI = ref(null)
+
+// CQRS Config Modal state
+const isCqrsModalOpen = ref(false)
+const cqrsModalReadModelId = ref(null)
+const cqrsModalReadModelData = ref(null)
 
 const { fitView, zoomIn, zoomOut } = useVueFlow()
 
@@ -188,6 +196,22 @@ function onNodeDoubleClick(event) {
     })
   }
 }
+
+// Handle CQRS Config Modal
+function openCqrsConfigModal(readModelId, readModelData) {
+  cqrsModalReadModelId.value = readModelId
+  cqrsModalReadModelData.value = readModelData
+  isCqrsModalOpen.value = true
+}
+
+function closeCqrsConfigModal() {
+  isCqrsModalOpen.value = false
+  cqrsModalReadModelId.value = null
+  cqrsModalReadModelData.value = null
+}
+
+// Provide the CQRS modal handler to child nodes
+provide('openCqrsConfigModal', openCqrsConfigModal)
 </script>
 
 <template>
@@ -422,6 +446,15 @@ function onNodeDoubleClick(event) {
         </div>
       </div>
     </div>
+    
+    <!-- CQRS Config Modal -->
+    <ReadModelCQRSConfigModal
+      :visible="isCqrsModalOpen"
+      :read-model-id="cqrsModalReadModelId"
+      :read-model-data="cqrsModalReadModelData"
+      @close="closeCqrsConfigModal"
+      @updated="() => {}"
+    />
   </div>
 </template>
 

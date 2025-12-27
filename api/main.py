@@ -11,12 +11,15 @@ from __future__ import annotations
 
 import os
 from contextlib import asynccontextmanager
-from typing import Any
+from typing import Any, Optional
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from neo4j import GraphDatabase
+from pydantic import BaseModel
+
+from agent.neo4j_client import get_neo4j_client
 
 load_dotenv()
 
@@ -388,7 +391,24 @@ async def get_context_full_tree(context_id: str) -> dict[str, Any]:
     WITH rm, collect(prop {.id, .name, .type, .description, .isRequired}) as properties
     RETURN rm {.id, .name, .description, .provisioningType, .cqrsConfig} as readmodel,
            properties
-    ORDER BY rm.name
+    ORDER BY readmodel.name
+    """
+    
+    # Get UI wireframes for this BC
+    ui_query = """
+    MATCH (bc:BoundedContext {id: $context_id})-[:HAS_UI]->(ui:UI)
+    RETURN ui {.id, .name, .description, .template, .attachedToId, .attachedToType, .attachedToName, .userStoryId} as ui
+    ORDER BY ui.name
+    """
+    
+    # Get CQRS Operations for ReadModels in this BC
+    cqrs_ops_query = """
+    MATCH (bc:BoundedContext {id: $context_id})-[:HAS_READMODEL]->(rm:ReadModel)-[:HAS_CQRS]->(cqrs:CQRSConfig)-[:HAS_OPERATION]->(op:CQRSOperation)
+    OPTIONAL MATCH (op)-[:TRIGGERED_BY]->(evt:Event)
+    RETURN rm.id as readmodelId, 
+           op {.id, .operationType, .triggerEventId} as operation,
+           evt.name as triggerEventName
+    ORDER BY rm.id, op.operationType
     """
     
     # Get Properties for all objects in this BC
@@ -469,12 +489,33 @@ async def get_context_full_tree(context_id: str) -> dict[str, Any]:
         # ReadModels
         rm_result = session.run(rm_query, context_id=context_id)
         readmodels = []
+        readmodels_map = {}
         for record in rm_result:
             rm = dict(record["readmodel"])
             rm["type"] = "ReadModel"
             # Filter out null properties
             rm["properties"] = [p for p in record["properties"] if p and p.get("id")]
+            rm["operations"] = []  # Will be populated below
             readmodels.append(rm)
+            readmodels_map[rm["id"]] = rm
+        
+        # CQRS Operations for ReadModels
+        cqrs_ops_result = session.run(cqrs_ops_query, context_id=context_id)
+        for record in cqrs_ops_result:
+            rm_id = record["readmodelId"]
+            if rm_id in readmodels_map and record["operation"]:
+                op = dict(record["operation"])
+                op["type"] = "CQRSOperation"
+                op["triggerEventName"] = record["triggerEventName"]
+                readmodels_map[rm_id]["operations"].append(op)
+        
+        # UI wireframes
+        ui_result = session.run(ui_query, context_id=context_id)
+        uis = []
+        for record in ui_result:
+            ui = dict(record["ui"])
+            ui["type"] = "UI"
+            uis.append(ui)
         
         # Properties - organize by parent
         prop_result = session.run(prop_query, context_id=context_id)
@@ -503,6 +544,7 @@ async def get_context_full_tree(context_id: str) -> dict[str, Any]:
         bc["aggregates"] = list(aggregates.values())
         bc["policies"] = policies
         bc["readmodels"] = readmodels
+        bc["uis"] = uis
         
         return bc
 
@@ -1411,6 +1453,178 @@ async def get_event_triggers(event_id: str) -> dict[str, Any]:
             "nodes": nodes,
             "relationships": unique_rels
         }
+
+
+# =============================================
+# CQRS Configuration API Endpoints
+# =============================================
+
+class CQRSOperationCreate(BaseModel):
+    """Request model for creating a CQRS operation."""
+    operation_type: str  # "INSERT", "UPDATE", "DELETE"
+    trigger_event_id: str
+
+
+class CQRSMappingCreate(BaseModel):
+    """Request model for creating a CQRS mapping."""
+    target_property_id: str
+    source_property_id: Optional[str] = None
+    source_type: str = "event"  # "event" or "value"
+    static_value: Optional[str] = None
+
+
+class CQRSWhereCreate(BaseModel):
+    """Request model for creating a CQRS where condition."""
+    target_property_id: str
+    source_event_field_id: str
+    operator: str = "="
+
+
+@app.post("/api/readmodel/{readmodel_id}/cqrs")
+async def create_cqrs_config(readmodel_id: str) -> dict[str, Any]:
+    """
+    Create a CQRSConfig for a ReadModel.
+    If one already exists, return the existing one.
+    """
+    client = get_neo4j_client()
+    
+    # Check if config already exists
+    existing = client.get_cqrs_config(readmodel_id)
+    if existing and existing.get("id"):
+        return existing
+    
+    # Create new config
+    return client.create_cqrs_config(readmodel_id)
+
+
+@app.get("/api/readmodel/{readmodel_id}/cqrs")
+async def get_cqrs_config(readmodel_id: str) -> dict[str, Any]:
+    """
+    Get the full CQRS configuration for a ReadModel,
+    including all operations, mappings, and where conditions.
+    """
+    client = get_neo4j_client()
+    config = client.get_cqrs_config(readmodel_id)
+    
+    if not config:
+        # Return empty structure if no config exists
+        return {
+            "id": None,
+            "readmodelId": readmodel_id,
+            "operations": []
+        }
+    
+    return config
+
+
+@app.delete("/api/readmodel/{readmodel_id}/cqrs")
+async def delete_cqrs_config(readmodel_id: str) -> dict[str, Any]:
+    """Delete the entire CQRS configuration for a ReadModel."""
+    client = get_neo4j_client()
+    deleted = client.delete_cqrs_config(readmodel_id)
+    return {"success": deleted, "readmodelId": readmodel_id}
+
+
+@app.get("/api/readmodel/{readmodel_id}/cqrs/events")
+async def get_events_for_cqrs(readmodel_id: str) -> list[dict[str, Any]]:
+    """
+    Get all available events that can be used as triggers for CQRS operations.
+    Each event includes its properties for mapping configuration.
+    """
+    client = get_neo4j_client()
+    return client.get_events_for_cqrs(readmodel_id)
+
+
+@app.get("/api/readmodel/{readmodel_id}/properties")
+async def get_readmodel_properties(readmodel_id: str) -> list[dict[str, Any]]:
+    """
+    Get all properties of a ReadModel for CQRS mapping configuration.
+    """
+    client = get_neo4j_client()
+    return client.get_readmodel_properties(readmodel_id)
+
+
+@app.post("/api/readmodel/{readmodel_id}/cqrs/operations")
+async def create_cqrs_operation(
+    readmodel_id: str,
+    operation: CQRSOperationCreate
+) -> dict[str, Any]:
+    """
+    Create a new CQRS operation (INSERT/UPDATE/DELETE) for a ReadModel.
+    """
+    client = get_neo4j_client()
+    
+    # Ensure CQRSConfig exists
+    config = client.get_cqrs_config(readmodel_id)
+    if not config or not config.get("id"):
+        config = client.create_cqrs_config(readmodel_id)
+    
+    cqrs_config_id = config["id"]
+    
+    return client.create_cqrs_operation(
+        cqrs_config_id=cqrs_config_id,
+        operation_type=operation.operation_type,
+        trigger_event_id=operation.trigger_event_id,
+    )
+
+
+@app.delete("/api/cqrs/operation/{operation_id}")
+async def delete_cqrs_operation(operation_id: str) -> dict[str, Any]:
+    """Delete a CQRS operation and all its mappings/where conditions."""
+    client = get_neo4j_client()
+    deleted = client.delete_cqrs_operation(operation_id)
+    return {"success": deleted, "operationId": operation_id}
+
+
+@app.post("/api/cqrs/operation/{operation_id}/mappings")
+async def create_cqrs_mapping(
+    operation_id: str,
+    mapping: CQRSMappingCreate
+) -> dict[str, Any]:
+    """
+    Create a field mapping for a CQRS operation.
+    """
+    client = get_neo4j_client()
+    return client.create_cqrs_mapping(
+        operation_id=operation_id,
+        target_property_id=mapping.target_property_id,
+        source_property_id=mapping.source_property_id,
+        source_type=mapping.source_type,
+        static_value=mapping.static_value,
+    )
+
+
+@app.delete("/api/cqrs/mapping/{mapping_id}")
+async def delete_cqrs_mapping(mapping_id: str) -> dict[str, Any]:
+    """Delete a CQRS field mapping."""
+    client = get_neo4j_client()
+    deleted = client.delete_cqrs_mapping(mapping_id)
+    return {"success": deleted, "mappingId": mapping_id}
+
+
+@app.post("/api/cqrs/operation/{operation_id}/where")
+async def create_cqrs_where(
+    operation_id: str,
+    where: CQRSWhereCreate
+) -> dict[str, Any]:
+    """
+    Create a WHERE condition for an UPDATE/DELETE CQRS operation.
+    """
+    client = get_neo4j_client()
+    return client.create_cqrs_where(
+        operation_id=operation_id,
+        target_property_id=where.target_property_id,
+        source_event_field_id=where.source_event_field_id,
+        operator=where.operator,
+    )
+
+
+@app.delete("/api/cqrs/where/{where_id}")
+async def delete_cqrs_where(where_id: str) -> dict[str, Any]:
+    """Delete a CQRS WHERE condition."""
+    client = get_neo4j_client()
+    deleted = client.delete_cqrs_where(where_id)
+    return {"success": deleted, "whereId": where_id}
 
 
 if __name__ == "__main__":

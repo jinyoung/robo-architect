@@ -320,6 +320,7 @@ export const useNavigatorStore = defineStore('navigator', () => {
         aggregates: [],
         policies: [],
         readmodels: [],
+        uis: [],
         userStories: []
       }
     }
@@ -340,6 +341,77 @@ export const useNavigatorStore = defineStore('navigator', () => {
       contextTrees.value = { ...contextTrees.value }
       
       markAsNew(readModelData.id)
+    }
+  }
+  
+  // Dynamically add a CQRS Operation to a ReadModel (used during ingestion)
+  function addCQRSOperation(operationData) {
+    const readModelId = operationData.parentId
+    
+    // Find the ReadModel in any BC's tree
+    for (const bcId in contextTrees.value) {
+      const tree = contextTrees.value[bcId]
+      
+      const readModel = tree.readmodels?.find(rm => rm.id === readModelId)
+      if (readModel) {
+        if (!readModel.operations) readModel.operations = []
+        const exists = readModel.operations.some(op => op.id === operationData.id)
+        if (!exists) {
+          readModel.operations.push({
+            id: operationData.id,
+            operationType: operationData.operationType,
+            triggerEventId: operationData.triggerEventId,
+            triggerEventName: operationData.triggerEventName,
+            type: 'CQRSOperation',
+            name: `${operationData.operationType} ← ${operationData.triggerEventName || operationData.triggerEventId}`
+          })
+          
+          // Force reactivity update
+          contextTrees.value = { ...contextTrees.value }
+          
+          markAsNew(operationData.id)
+          expandedNodes.value.add(readModelId)
+          expandedNodes.value = new Set(expandedNodes.value)
+        }
+        return
+      }
+    }
+  }
+  
+  // Dynamically add a UI wireframe to a BC (used during ingestion)
+  function addUI(uiData) {
+    const bcId = uiData.parentId
+    
+    // Ensure the tree exists
+    if (!contextTrees.value[bcId]) {
+      contextTrees.value[bcId] = {
+        id: bcId,
+        aggregates: [],
+        policies: [],
+        readmodels: [],
+        uis: [],
+        userStories: []
+      }
+    }
+    
+    const tree = contextTrees.value[bcId]
+    if (!tree.uis) tree.uis = []
+    
+    const exists = tree.uis.some(ui => ui.id === uiData.id)
+    if (!exists) {
+      tree.uis.push({
+        id: uiData.id,
+        name: uiData.name,
+        type: 'UI',
+        attachedToId: uiData.attachedToId,
+        attachedToType: uiData.attachedToType,
+        attachedToName: uiData.attachedToName
+      })
+      
+      // Force reactivity update
+      contextTrees.value = { ...contextTrees.value }
+      
+      markAsNew(uiData.id)
     }
   }
   
@@ -560,6 +632,8 @@ export const useNavigatorStore = defineStore('navigator', () => {
     addEvent,
     addPolicy,
     addReadModel,
+    addCQRSOperation,
+    addUI,
     addProperty,
     addItemToTree,
     isNewlyAdded,

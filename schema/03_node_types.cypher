@@ -401,3 +401,98 @@ CREATE (ui:UI {
 </div>
     '
 });
+
+
+// ############################################################
+// 11. CQRSConfig (CQRS 설정 컨테이너)
+// ############################################################
+// 설명: ReadModel의 CQRS 설정을 담는 컨테이너 노드
+// 관계:
+//   - HAS_CQRS ← ReadModel
+//   - HAS_OPERATION → CQRSOperation
+//
+// 필수 속성:
+//   - id: String (고유 식별자, CQRS-{ReadModelID} 형식)
+//   - readmodelId: String (연결된 ReadModel ID)
+// ############################################################
+
+// Example:
+// CREATE (cqrs:CQRSConfig {
+//     id: "CQRS-RM-MYPAGE-ORDER-STATUS",
+//     readmodelId: "RM-MYPAGE-ORDER-STATUS"
+// });
+
+
+// ############################################################
+// 12. CQRSOperation (CQRS 작업 노드)
+// ############################################################
+// 설명: INSERT/UPDATE/DELETE 작업 정의
+// 관계:
+//   - HAS_OPERATION ← CQRSConfig
+//   - TRIGGERED_BY → Event (트리거 이벤트)
+//   - HAS_MAPPING → CQRSMapping
+//   - HAS_WHERE → CQRSWhere (UPDATE/DELETE용)
+//
+// 필수 속성:
+//   - id: String (고유 식별자)
+//   - operationType: String ("INSERT", "UPDATE", "DELETE")
+//   - cqrsConfigId: String (부모 CQRSConfig ID)
+//   - triggerEventId: String (트리거 이벤트 ID)
+// ############################################################
+
+// Example:
+// CREATE (op:CQRSOperation {
+//     id: "CQRS-OP-RM-MYPAGE-INSERT-ORDERPLACED",
+//     operationType: "INSERT",
+//     cqrsConfigId: "CQRS-RM-MYPAGE-ORDER-STATUS",
+//     triggerEventId: "EVT-ORDER-PLACED"
+// });
+
+
+// ############################################################
+// 13. CQRSMapping (필드 매핑 노드)
+// ############################################################
+// 설명: 소스 속성에서 타겟 속성으로의 매핑 정의
+// 관계:
+//   - HAS_MAPPING ← CQRSOperation
+//   - SOURCE → Property (Event의 속성)
+//   - TARGET → Property (ReadModel의 속성)
+//
+// 필수 속성:
+//   - id: String (고유 식별자)
+//   - operationId: String (부모 CQRSOperation ID)
+//
+// 선택 속성:
+//   - sourceType: String ("event", "value") - 값 유형
+//   - staticValue: String - sourceType이 "value"일 때 사용할 정적 값
+// ############################################################
+
+// Example:
+// CREATE (m:CQRSMapping {
+//     id: "CQRS-MAP-RM-MYPAGE-ORDERID",
+//     operationId: "CQRS-OP-RM-MYPAGE-INSERT-ORDERPLACED",
+//     sourceType: "event"
+// });
+
+
+// ############################################################
+// 14. CQRSWhere (조건절 노드)
+// ############################################################
+// 설명: UPDATE/DELETE 작업의 WHERE 조건 정의
+// 관계:
+//   - HAS_WHERE ← CQRSOperation
+//   - TARGET → Property (ReadModel 속성 - 조건 필드)
+//   - SOURCE_EVENT_FIELD → Property (Event 속성 - 비교값)
+//
+// 필수 속성:
+//   - id: String (고유 식별자)
+//   - operationId: String (부모 CQRSOperation ID)
+//   - operator: String ("=", "!=", ">", "<", ">=", "<=")
+// ############################################################
+
+// Example:
+// CREATE (w:CQRSWhere {
+//     id: "CQRS-WHERE-RM-MYPAGE-UPDATE-ORDERID",
+//     operationId: "CQRS-OP-RM-MYPAGE-UPDATE-DELIVERYSTARTED",
+//     operator: "="
+// });

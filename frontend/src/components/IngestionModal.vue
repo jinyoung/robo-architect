@@ -1,5 +1,5 @@
 <script setup>
-import { ref, computed, watch, onUnmounted } from 'vue'
+import { ref, computed, watch, onUnmounted, onMounted } from 'vue'
 import { useNavigatorStore } from '../stores/navigator'
 
 const props = defineProps({
@@ -9,9 +9,12 @@ const props = defineProps({
   }
 })
 
-const emit = defineEmits(['update:modelValue', 'complete'])
+const emit = defineEmits(['update:modelValue', 'complete', 'session-restored'])
 
 const navigatorStore = useNavigatorStore()
+
+// LocalStorage key for persisting session
+const SESSION_STORAGE_KEY = 'ingestion_active_session'
 
 // State
 const dragActive = ref(false)
@@ -129,6 +132,7 @@ const phaseLabel = computed(() => {
     'extracting_aggregates': 'Aggregate 추출',
     'extracting_commands': 'Command 추출',
     'extracting_readmodels': 'ReadModel 추출',
+    'generating_ui': 'UI 스티커 생성',
     'extracting_events': 'Event 추출',
     'identifying_policies': 'Policy 식별',
     'generating_properties': '속성 생성',
@@ -332,6 +336,9 @@ async function startIngestion() {
     isUploading.value = false
     isProcessing.value = true
     
+    // Persist session to localStorage for page refresh recovery
+    saveSessionToStorage(session_id)
+    
     // Close the upload modal, show floating panel
     isOpen.value = false
     
@@ -345,8 +352,11 @@ async function startIngestion() {
   }
 }
 
-function connectToStream(sid) {
-  eventSource.value = new EventSource(`/api/ingest/stream/${sid}`)
+function connectToStream(sid, isReconnect = false) {
+  const url = isReconnect 
+    ? `/api/ingest/stream/${sid}?reconnect=true`
+    : `/api/ingest/stream/${sid}`
+  eventSource.value = new EventSource(url)
   
   eventSource.value.addEventListener('progress', (e) => {
     const data = JSON.parse(e.data)
@@ -383,6 +393,10 @@ function connectToStream(sid) {
           navigatorStore.addPolicy(obj)
         } else if (obj.type === 'ReadModel') {
           navigatorStore.addReadModel(obj)
+        } else if (obj.type === 'UI') {
+          navigatorStore.addUI(obj)
+        } else if (obj.type === 'CQRSOperation') {
+          navigatorStore.addCQRSOperation(obj)
         } else if (obj.type === 'Property') {
           navigatorStore.addProperty(obj)
         }
@@ -407,6 +421,7 @@ function connectToStream(sid) {
     if (data.phase === 'complete') {
       isProcessing.value = false
       closeStream()
+      clearSessionFromStorage()
       navigatorStore.refreshAll()
     }
     
@@ -415,6 +430,7 @@ function connectToStream(sid) {
       error.value = data.message
       isProcessing.value = false
       closeStream()
+      clearSessionFromStorage()
     }
   })
   
@@ -432,6 +448,81 @@ function closeStream() {
     eventSource.value = null
   }
 }
+
+// Session persistence for page refresh recovery
+function saveSessionToStorage(sid) {
+  const sessionData = {
+    sessionId: sid,
+    startedAt: Date.now()
+  }
+  localStorage.setItem(SESSION_STORAGE_KEY, JSON.stringify(sessionData))
+}
+
+function clearSessionFromStorage() {
+  localStorage.removeItem(SESSION_STORAGE_KEY)
+}
+
+function getSessionFromStorage() {
+  try {
+    const data = localStorage.getItem(SESSION_STORAGE_KEY)
+    if (!data) return null
+    
+    const session = JSON.parse(data)
+    // Session expires after 30 minutes
+    const thirtyMinutes = 30 * 60 * 1000
+    if (Date.now() - session.startedAt > thirtyMinutes) {
+      clearSessionFromStorage()
+      return null
+    }
+    return session
+  } catch (e) {
+    clearSessionFromStorage()
+    return null
+  }
+}
+
+// Check for and restore active session on mount
+async function checkAndRestoreSession() {
+  const savedSession = getSessionFromStorage()
+  if (!savedSession) return
+  
+  try {
+    // Check if session is still active on server
+    const response = await fetch(`/api/ingest/session/${savedSession.sessionId}/status`)
+    if (!response.ok) {
+      clearSessionFromStorage()
+      return
+    }
+    
+    const status = await response.json()
+    
+    if (status.active) {
+      // Session is still active, restore it
+      sessionId.value = savedSession.sessionId
+      isProcessing.value = true
+      currentPhase.value = status.phase || 'processing'
+      currentMessage.value = status.message || '진행 중인 세션에 재연결 중...'
+      progress.value = status.progress || 0
+      
+      // Emit event so parent knows to show the panel
+      emit('session-restored')
+      
+      // Reconnect to SSE stream with replay
+      connectToStream(savedSession.sessionId, true)
+    } else {
+      // Session completed or errored, clear storage
+      clearSessionFromStorage()
+    }
+  } catch (e) {
+    console.error('Failed to restore session:', e)
+    clearSessionFromStorage()
+  }
+}
+
+// On mount, check for active session
+onMounted(() => {
+  checkAndRestoreSession()
+})
 
 function closeModal() {
   // Reset state
@@ -500,6 +591,8 @@ function getTypeIcon(type) {
     Event: 'E',
     Policy: 'P',
     ReadModel: 'RM',
+    UI: 'UI',
+    CQRSOperation: '⚡',
     Property: '{ }'
   }
   return icons[type] || '?'
@@ -519,16 +612,22 @@ const sampleText = `# 온라인 쇼핑몰 요구사항
 
 ## 1. 주문 관리
 - 고객은 상품을 장바구니에 담고 주문할 수 있어야 한다
+  - UI: 주문 화면에서 상품명, 수량, 배송지 주소를 입력하고 '주문하기' 버튼을 클릭한다
 - 고객은 주문을 취소할 수 있어야 한다 (배송 전까지)
+  - UI: 주문 상세 화면에서 '주문 취소' 버튼을 클릭하면 취소 사유를 선택하는 모달이 표시된다
 - 고객은 주문 상태를 조회할 수 있어야 한다
+  - UI: 마이페이지에서 주문 목록을 테이블 형태로 조회할 수 있다 (주문번호, 상품명, 주문일시, 상태)
 
 ## 2. 상품 관리
 - 판매자는 상품을 등록할 수 있어야 한다
+  - UI: 상품 등록 폼에서 상품명, 가격, 설명, 재고수량, 카테고리를 입력하고 상품 이미지를 업로드한다
 - 판매자는 상품 정보를 수정할 수 있어야 한다
 - 판매자는 상품 재고를 관리할 수 있어야 한다
+  - UI: 재고 관리 대시보드에서 상품별 현재 재고, 입고 예정, 경고 수준을 확인할 수 있다
 
 ## 3. 결제 처리
 - 시스템은 주문 시 결제를 처리해야 한다
+  - UI: 결제 화면에서 결제 수단(카드/계좌이체/간편결제)을 선택하고 결제 정보를 입력한다
 - 주문 취소 시 자동으로 환불이 처리되어야 한다
 
 ## 4. 재고 관리
@@ -905,6 +1004,14 @@ function useSample() {
               <div v-if="summary.readmodels" class="mini-stat">
                 <span class="mini-stat__icon stat-icon--readmodel">RM</span>
                 <span class="mini-stat__value">{{ summary.readmodels }}</span>
+              </div>
+              <div v-if="summary.uis" class="mini-stat">
+                <span class="mini-stat__icon stat-icon--ui">UI</span>
+                <span class="mini-stat__value">{{ summary.uis }}</span>
+              </div>
+              <div v-if="summary.cqrs_operations" class="mini-stat">
+                <span class="mini-stat__icon stat-icon--cqrsoperation">⚡</span>
+                <span class="mini-stat__value">{{ summary.cqrs_operations }}</span>
               </div>
               <div v-if="summary.properties" class="mini-stat">
                 <span class="mini-stat__icon stat-icon--property">{ }</span>
@@ -1635,6 +1742,8 @@ function useSample() {
 .item-icon--event { background: var(--color-event); }
 .item-icon--policy { background: var(--color-policy); }
 .item-icon--readmodel { background: var(--color-readmodel, #40c057); font-size: 0.45rem; }
+.item-icon--ui { background: var(--color-ui, #ffffff); color: #343a40; border: 1px solid #ced4da; font-size: 0.5rem; }
+.item-icon--cqrsoperation { background: linear-gradient(135deg, #fcc419 0%, #fd7e14 100%); font-size: 0.55rem; }
 .item-icon--property { background: #868e96; font-size: 0.5rem; }
 
 .mini-item__name {
@@ -1689,6 +1798,8 @@ function useSample() {
 .stat-icon--event { background: var(--color-event); }
 .stat-icon--policy { background: var(--color-policy); }
 .stat-icon--readmodel { background: var(--color-readmodel, #40c057); font-size: 0.4rem; }
+.stat-icon--ui { background: var(--color-ui, #ffffff); color: #343a40; border: 1px solid #ced4da; font-size: 0.4rem; }
+.stat-icon--cqrsoperation { background: linear-gradient(135deg, #fcc419 0%, #fd7e14 100%); font-size: 0.5rem; }
 .stat-icon--property { background: #868e96; font-size: 0.45rem; }
 
 .mini-stat__value {
