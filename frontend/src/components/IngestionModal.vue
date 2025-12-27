@@ -45,6 +45,10 @@ const dragOffset = ref({ x: 0, y: 0 })
 const isPaused = ref(false)
 const isTogglingPause = ref(false)
 
+// Cache state
+const isCacheEnabled = ref(false)
+const isTogglingCache = ref(false)
+
 // Panel drag handlers
 function startDrag(e) {
   if (e.target.closest('.panel-btn')) return // Don't drag when clicking buttons
@@ -124,6 +128,7 @@ const phaseLabel = computed(() => {
     'identifying_bc': 'BC 식별',
     'extracting_aggregates': 'Aggregate 추출',
     'extracting_commands': 'Command 추출',
+    'extracting_readmodels': 'ReadModel 추출',
     'extracting_events': 'Event 추출',
     'identifying_policies': 'Policy 식별',
     'generating_properties': '속성 생성',
@@ -145,10 +150,13 @@ const hasExistingData = computed(() => {
   return existingDataStats.value && existingDataStats.value.total > 0
 })
 
-// Watch for modal open to check existing data
+// Watch for modal open to check existing data and cache status
 watch(isOpen, async (newVal) => {
   if (newVal) {
-    await checkExistingData()
+    await Promise.all([
+      checkExistingData(),
+      checkCacheStatus()
+    ])
   }
 })
 
@@ -213,6 +221,41 @@ async function checkExistingData() {
     existingDataStats.value = null
   } finally {
     isLoadingStats.value = false
+  }
+}
+
+// Check cache status
+async function checkCacheStatus() {
+  try {
+    const response = await fetch('/api/ingest/cache/status')
+    if (response.ok) {
+      const data = await response.json()
+      isCacheEnabled.value = data.enabled
+    }
+  } catch (e) {
+    console.error('Failed to check cache status:', e)
+  }
+}
+
+// Toggle cache on/off
+async function toggleCache() {
+  if (isTogglingCache.value) return
+  
+  isTogglingCache.value = true
+  try {
+    const endpoint = isCacheEnabled.value ? 'disable' : 'enable'
+    const response = await fetch(`/api/ingest/cache/${endpoint}`, {
+      method: 'POST'
+    })
+    
+    if (response.ok) {
+      const data = await response.json()
+      isCacheEnabled.value = data.enabled
+    }
+  } catch (e) {
+    console.error('Failed to toggle cache:', e)
+  } finally {
+    isTogglingCache.value = false
   }
 }
 
@@ -320,28 +363,30 @@ function connectToStream(sid) {
       isPaused.value = false
     }
     
-    // Handle created objects
-    if (data.data?.object) {
-      const obj = data.data.object
-      createdItems.value.push(obj)
-      
-      // Trigger navigator updates for dynamic display
-      if (obj.type === 'UserStory') {
-        navigatorStore.addUserStory(obj)
-      } else if (obj.type === 'BoundedContext') {
-        navigatorStore.addContext(obj)
-      } else if (obj.type === 'Aggregate') {
-        navigatorStore.addAggregate(obj)
-      } else if (obj.type === 'Command') {
-        navigatorStore.addCommand(obj)
-      } else if (obj.type === 'Event') {
-        navigatorStore.addEvent(obj)
-      } else if (obj.type === 'Policy') {
-        navigatorStore.addPolicy(obj)
-      } else if (obj.type === 'Property') {
-        navigatorStore.addProperty(obj)
+// Handle created objects
+      if (data.data?.object) {
+        const obj = data.data.object
+        createdItems.value.push(obj)
+        
+        // Trigger navigator updates for dynamic display
+        if (obj.type === 'UserStory') {
+          navigatorStore.addUserStory(obj)
+        } else if (obj.type === 'BoundedContext') {
+          navigatorStore.addContext(obj)
+        } else if (obj.type === 'Aggregate') {
+          navigatorStore.addAggregate(obj)
+        } else if (obj.type === 'Command') {
+          navigatorStore.addCommand(obj)
+        } else if (obj.type === 'Event') {
+          navigatorStore.addEvent(obj)
+        } else if (obj.type === 'Policy') {
+          navigatorStore.addPolicy(obj)
+        } else if (obj.type === 'ReadModel') {
+          navigatorStore.addReadModel(obj)
+        } else if (obj.type === 'Property') {
+          navigatorStore.addProperty(obj)
+        }
       }
-    }
     
     // Handle User Story assignment to BC (move animation)
     if (data.data?.type === 'UserStoryAssigned') {
@@ -454,6 +499,7 @@ function getTypeIcon(type) {
     Command: 'C',
     Event: 'E',
     Policy: 'P',
+    ReadModel: 'RM',
     Property: '{ }'
   }
   return icons[type] || '?'
@@ -583,30 +629,48 @@ function useSample() {
             
             <!-- Normal upload UI (hidden during confirm) -->
             <template v-if="!showClearConfirm">
-              <!-- Input Mode Tabs -->
-              <div class="input-tabs">
-                <button 
-                  :class="['tab-btn', { active: inputMode === 'file' }]"
-                  @click="inputMode = 'file'"
-                >
-                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                    <path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"></path>
-                    <polyline points="13 2 13 9 20 9"></polyline>
-                  </svg>
-                  파일 업로드
-                </button>
-                <button 
-                  :class="['tab-btn', { active: inputMode === 'text' }]"
-                  @click="inputMode = 'text'"
-                >
-                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                    <line x1="17" y1="10" x2="3" y2="10"></line>
-                    <line x1="21" y1="6" x2="3" y2="6"></line>
-                    <line x1="21" y1="14" x2="3" y2="14"></line>
-                    <line x1="17" y1="18" x2="3" y2="18"></line>
-                  </svg>
-                  텍스트 입력
-                </button>
+              <!-- Options Row: Input Mode + Cache Toggle -->
+              <div class="options-row">
+                <!-- Input Mode Tabs -->
+                <div class="input-tabs">
+                  <button 
+                    :class="['tab-btn', { active: inputMode === 'file' }]"
+                    @click="inputMode = 'file'"
+                  >
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                      <path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"></path>
+                      <polyline points="13 2 13 9 20 9"></polyline>
+                    </svg>
+                    파일 업로드
+                  </button>
+                  <button 
+                    :class="['tab-btn', { active: inputMode === 'text' }]"
+                    @click="inputMode = 'text'"
+                  >
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                      <line x1="17" y1="10" x2="3" y2="10"></line>
+                      <line x1="21" y1="6" x2="3" y2="6"></line>
+                      <line x1="21" y1="14" x2="3" y2="14"></line>
+                      <line x1="17" y1="18" x2="3" y2="18"></line>
+                    </svg>
+                    텍스트 입력
+                  </button>
+                </div>
+                
+                <!-- Cache Toggle -->
+                <div class="cache-toggle">
+                  <label class="cache-toggle__label" title="LangChain 캐시를 활성화하면 동일한 요청의 속도가 빨라집니다">
+                    <span class="cache-toggle__text">캐시</span>
+                    <button 
+                      class="cache-toggle__switch"
+                      :class="{ 'is-enabled': isCacheEnabled }"
+                      @click="toggleCache"
+                      :disabled="isTogglingCache"
+                    >
+                      <span class="cache-toggle__knob"></span>
+                    </button>
+                  </label>
+                </div>
               </div>
               
               <!-- File Upload Area -->
@@ -838,6 +902,10 @@ function useSample() {
                 <span class="mini-stat__icon stat-icon--policy">P</span>
                 <span class="mini-stat__value">{{ summary.policies }}</span>
               </div>
+              <div v-if="summary.readmodels" class="mini-stat">
+                <span class="mini-stat__icon stat-icon--readmodel">RM</span>
+                <span class="mini-stat__value">{{ summary.readmodels }}</span>
+              </div>
               <div v-if="summary.properties" class="mini-stat">
                 <span class="mini-stat__icon stat-icon--property">{ }</span>
                 <span class="mini-stat__value">{{ summary.properties }}</span>
@@ -1012,11 +1080,20 @@ function useSample() {
   gap: var(--spacing-md);
 }
 
+/* Options Row */
+.options-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--spacing-md);
+  margin-bottom: var(--spacing-md);
+}
+
 /* Input Tabs */
 .input-tabs {
   display: flex;
   gap: var(--spacing-xs);
-  margin-bottom: var(--spacing-md);
+  flex: 1;
 }
 
 .tab-btn {
@@ -1043,6 +1120,63 @@ function useSample() {
   background: var(--color-accent);
   border-color: var(--color-accent);
   color: white;
+}
+
+/* Cache Toggle */
+.cache-toggle {
+  flex-shrink: 0;
+}
+
+.cache-toggle__label {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-xs);
+  cursor: pointer;
+}
+
+.cache-toggle__text {
+  font-size: 0.75rem;
+  color: var(--color-text-light);
+}
+
+.cache-toggle__switch {
+  position: relative;
+  width: 36px;
+  height: 20px;
+  background: var(--color-bg-tertiary);
+  border: 1px solid var(--color-border);
+  border-radius: 10px;
+  cursor: pointer;
+  transition: background 0.2s, border-color 0.2s;
+}
+
+.cache-toggle__switch:hover {
+  border-color: var(--color-text-light);
+}
+
+.cache-toggle__switch.is-enabled {
+  background: var(--color-accent);
+  border-color: var(--color-accent);
+}
+
+.cache-toggle__switch:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.cache-toggle__knob {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 14px;
+  height: 14px;
+  background: white;
+  border-radius: 50%;
+  transition: transform 0.2s;
+}
+
+.cache-toggle__switch.is-enabled .cache-toggle__knob {
+  transform: translateX(16px);
 }
 
 /* Dropzone */
@@ -1494,12 +1628,13 @@ function useSample() {
   flex-shrink: 0;
 }
 
-.item-icon--userstory { background: #20c997; font-size: 0.5rem; }
+.item-icon--userstory { background: var(--color-userstory, #74c0fc); font-size: 0.5rem; }
 .item-icon--boundedcontext { background: var(--color-bc); border: 1.5px solid var(--color-text-light); color: var(--color-text-light); }
 .item-icon--aggregate { background: var(--color-aggregate); color: var(--color-bc); }
 .item-icon--command { background: var(--color-command); }
 .item-icon--event { background: var(--color-event); }
 .item-icon--policy { background: var(--color-policy); }
+.item-icon--readmodel { background: var(--color-readmodel, #40c057); font-size: 0.45rem; }
 .item-icon--property { background: #868e96; font-size: 0.5rem; }
 
 .mini-item__name {
@@ -1547,12 +1682,13 @@ function useSample() {
   color: white;
 }
 
-.stat-icon--userstory { background: #20c997; font-size: 0.55rem; }
+.stat-icon--userstory { background: var(--color-userstory, #74c0fc); font-size: 0.55rem; }
 .stat-icon--bc { background: var(--color-bc); border: 1.5px solid var(--color-text-light); color: var(--color-text-light); }
 .stat-icon--aggregate { background: var(--color-aggregate); color: var(--color-bc); }
 .stat-icon--command { background: var(--color-command); }
 .stat-icon--event { background: var(--color-event); }
 .stat-icon--policy { background: var(--color-policy); }
+.stat-icon--readmodel { background: var(--color-readmodel, #40c057); font-size: 0.4rem; }
 .stat-icon--property { background: #868e96; font-size: 0.45rem; }
 
 .mini-stat__value {

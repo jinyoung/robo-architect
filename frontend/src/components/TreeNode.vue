@@ -52,7 +52,8 @@ const nodeIcon = computed(() => {
       Command: 'API',
       Event: 'E',
       Policy: 'SVC',
-      Property: '{ }'
+      Property: '{ }',
+      ReadModel: 'RM'
     }
     return devIcons[props.node.type] || '?'
   }
@@ -63,7 +64,8 @@ const nodeIcon = computed(() => {
     Command: 'C',
     Event: 'E',
     Policy: 'P',
-    Property: '{ }'
+    Property: '{ }',
+    ReadModel: 'RM'
   }
   return icons[props.node.type] || '?'
 })
@@ -104,7 +106,11 @@ const children = computed(() => {
       ...p,
       type: 'Policy'
     }))
-    return [...userStories, ...aggregates, ...policies]
+    const readmodels = (props.tree.readmodels || []).map(rm => ({
+      ...rm,
+      type: 'ReadModel'
+    }))
+    return [...userStories, ...aggregates, ...policies, ...readmodels]
   }
   
   if (type === 'Aggregate') {
@@ -145,6 +151,14 @@ const children = computed(() => {
   // UserStory has no children
   if (type === 'UserStory') {
     return []
+  }
+  
+  // ReadModel children (properties)
+  if (type === 'ReadModel') {
+    return (props.node.properties || []).map(p => ({
+      ...p,
+      type: 'Property'
+    }))
   }
   
   return []
@@ -400,8 +414,8 @@ async function addToCanvas() {
 }
 
 .tree-node__edit-btn:hover {
-  background: rgba(32, 201, 151, 0.2);
-  color: #20c997;
+  background: rgba(116, 192, 252, 0.2);
+  color: #74c0fc;
 }
 
 /* User story specific styling */
@@ -411,7 +425,7 @@ async function addToCanvas() {
 }
 
 .tree-node__header:has(.tree-node__icon--userstory):hover {
-  border-left-color: #20c997;
+  border-left-color: #74c0fc;
 }
 </style>
 

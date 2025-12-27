@@ -5,6 +5,7 @@ Provides:
 - File upload endpoint (text, PDF)
 - SSE streaming for real-time progress updates
 - Integration with Event Storming workflow
+- LangChain cache support for faster repeated extractions
 """
 
 from __future__ import annotations
@@ -16,6 +17,7 @@ import sys
 import uuid
 from dataclasses import dataclass, field
 from enum import Enum
+from pathlib import Path
 from typing import Any, AsyncGenerator, Optional
 
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
@@ -26,6 +28,52 @@ from sse_starlette.sse import EventSourceResponse
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 router = APIRouter(prefix="/api/ingest", tags=["ingestion"])
+
+# =============================================================================
+# LangChain Cache Setup
+# =============================================================================
+
+_cache_enabled = False
+
+def enable_langchain_cache():
+    """Enable LangChain SQLite cache for faster repeated LLM calls."""
+    global _cache_enabled
+    if _cache_enabled:
+        return True
+    
+    try:
+        from langchain_community.cache import SQLiteCache
+        from langchain_core.globals import set_llm_cache
+        
+        # Create cache directory
+        cache_dir = Path(__file__).parent.parent / ".cache"
+        cache_dir.mkdir(exist_ok=True)
+        cache_file = cache_dir / "langchain_cache.db"
+        
+        set_llm_cache(SQLiteCache(database_path=str(cache_file)))
+        _cache_enabled = True
+        print(f"✅ LangChain cache enabled: {cache_file}")
+        return True
+    except Exception as e:
+        print(f"⚠️ LangChain cache setup failed: {e}")
+        return False
+
+def disable_langchain_cache():
+    """Disable LangChain cache."""
+    global _cache_enabled
+    try:
+        from langchain_core.globals import set_llm_cache
+        set_llm_cache(None)
+        _cache_enabled = False
+        print("❌ LangChain cache disabled")
+        return True
+    except Exception as e:
+        print(f"⚠️ LangChain cache disable failed: {e}")
+        return False
+
+def is_cache_enabled():
+    """Check if cache is enabled."""
+    return _cache_enabled
 
 
 # =============================================================================
@@ -40,6 +88,7 @@ class IngestionPhase(str, Enum):
     IDENTIFYING_BC = "identifying_bc"
     EXTRACTING_AGGREGATES = "extracting_aggregates"
     EXTRACTING_COMMANDS = "extracting_commands"
+    EXTRACTING_READMODELS = "extracting_readmodels"
     EXTRACTING_EVENTS = "extracting_events"
     IDENTIFYING_POLICIES = "identifying_policies"
     GENERATING_PROPERTIES = "generating_properties"
@@ -548,7 +597,134 @@ async def run_ingestion_workflow(
             )
             await wait_if_paused(session)
         
-        # Phase 6: Extract Events
+        # Phase 6: Extract ReadModels (CQRS / Query Models)
+        yield ProgressEvent(
+            phase=IngestionPhase.EXTRACTING_READMODELS,
+            message="ReadModel 추출 중...",
+            progress=67
+        )
+        
+        from agent.nodes import ReadModelList
+        from agent.prompts import EXTRACT_READMODELS_PROMPT
+        from agent.state import ReadModelCandidate
+        
+        all_readmodels = {}
+        all_events = {}  # Initialize for ReadModel extraction (will be populated in Event phase)
+        
+        for bc in bc_candidates:
+            bc_id_short = bc.id.replace("BC-", "")
+            bc_aggregates = all_aggregates.get(bc.id, [])
+            
+            # Get commands for this BC
+            bc_commands = []
+            for agg in bc_aggregates:
+                for cmd in all_commands.get(agg.id, []):
+                    bc_commands.append(cmd)
+            
+            if not bc_commands:
+                continue
+            
+            # Format commands for the prompt
+            commands_text = "\n".join([
+                f"- {cmd.name}: {cmd.description if hasattr(cmd, 'description') else 'No description'}"
+                for cmd in bc_commands
+            ])
+            
+            # Get events from OTHER BCs (for CQRS sources)
+            other_bc_events = []
+            for other_bc in bc_candidates:
+                if other_bc.id == bc.id:
+                    continue
+                for other_agg in all_aggregates.get(other_bc.id, []):
+                    for evt in all_events.get(other_agg.id, []):
+                        other_bc_events.append(
+                            f"- {evt.name} (from {other_bc.name})"
+                        )
+            
+            other_bc_events_text = "\n".join(other_bc_events) if other_bc_events else "(No events from other BCs yet)"
+            
+            # Get user stories for this BC
+            bc_stories = [us for us in user_stories if us.id in bc.user_story_ids]
+            stories_text = "\n".join([
+                f"- [{us.id}] {us.role}: {us.action}"
+                for us in bc_stories
+            ])
+            
+            prompt = EXTRACT_READMODELS_PROMPT.format(
+                bc_name=bc.name,
+                bc_id=bc.id,
+                bc_description=bc.description,
+                commands=commands_text,
+                other_bc_events=other_bc_events_text,
+                user_stories=stories_text
+            )
+            
+            try:
+                structured_llm = llm.with_structured_output(ReadModelList)
+                rm_response = structured_llm.invoke([
+                    SystemMessage(content=SYSTEM_PROMPT),
+                    HumanMessage(content=prompt)
+                ])
+                readmodels = rm_response.readmodels
+            except Exception as e:
+                print(f"[ReadModel] Error extracting ReadModels for {bc.name}: {e}")
+                readmodels = []
+            
+            if readmodels:
+                all_readmodels[bc.id] = readmodels
+                
+                for rm in readmodels:
+                    # Convert CQRS config to JSON string if present
+                    cqrs_config_str = None
+                    if rm.cqrs_config:
+                        import json as json_lib
+                        cqrs_config_str = json_lib.dumps(rm.cqrs_config.model_dump())
+                    
+                    client.create_readmodel(
+                        id=rm.id,
+                        name=rm.name,
+                        bc_id=bc.id,
+                        description=rm.description,
+                        provisioning_type=rm.provisioning_type,
+                        cqrs_config=cqrs_config_str
+                    )
+                    
+                    # Link ReadModel to User Stories via IMPLEMENTS relationship
+                    # Use user_story_ids from ReadModel or fall back to BC's user stories
+                    rm_user_story_ids = rm.user_story_ids if hasattr(rm, 'user_story_ids') and rm.user_story_ids else bc.user_story_ids
+                    for us_id in rm_user_story_ids:
+                        try:
+                            client.link_user_story_to_readmodel(us_id, rm.id)
+                        except Exception as e:
+                            print(f"[ReadModel] Failed to link US {us_id} to RM {rm.id}: {e}")
+                    
+                    yield ProgressEvent(
+                        phase=IngestionPhase.EXTRACTING_READMODELS,
+                        message=f"ReadModel 생성: {rm.name}",
+                        progress=70,
+                        data={
+                            "type": "ReadModel",
+                            "object": {
+                                "id": rm.id,
+                                "name": rm.name,
+                                "type": "ReadModel",
+                                "parentId": bc.id,
+                                "provisioningType": rm.provisioning_type
+                            }
+                        }
+                    )
+                    await asyncio.sleep(0.15)
+        
+        # Check for pause after ReadModel extraction
+        if session.is_paused:
+            yield ProgressEvent(
+                phase=IngestionPhase.PAUSED,
+                message="⏸️ 일시 정지됨 - ReadModel 추출 완료",
+                progress=72
+            )
+            await wait_if_paused(session)
+        
+        # Phase 7: Extract Events
         yield ProgressEvent(
             phase=IngestionPhase.EXTRACTING_EVENTS,
             message="Event 추출 중...",
@@ -969,7 +1145,7 @@ async def run_ingestion_workflow(
                             yield ProgressEvent(
                                 phase=IngestionPhase.GENERATING_PROPERTIES,
                                 message=f"Property 생성: {evt.name}.{prop.name}",
-                                progress=99,
+                                progress=97,
                                 data={
                                     "type": "Property",
                                     "object": {
@@ -986,6 +1162,108 @@ async def run_ingestion_workflow(
                         except Exception:
                             pass
         
+        # 8.4: Generate properties for each ReadModel (after Event properties for CQRS context)
+        from agent.prompts import EXTRACT_READMODEL_PROPERTIES_PROMPT
+        
+        for bc in bc_candidates:
+            bc_readmodels = all_readmodels.get(bc.id, [])
+            bc_stories = [us for us in user_stories if us.id in bc.user_story_ids]
+            stories_text = "\n".join([
+                f"- [{us.id}] {us.role}: {us.action}"
+                for us in bc_stories
+            ])
+            
+            for rm in bc_readmodels:
+                yield ProgressEvent(
+                    phase=IngestionPhase.GENERATING_PROPERTIES,
+                    message=f"ReadModel {rm.name} 속성 생성 중...",
+                    progress=98
+                )
+                
+                # Get source events info for CQRS context
+                source_events_text = "(No source events specified)"
+                if hasattr(rm, 'source_event_ids') and rm.source_event_ids:
+                    source_event_names = []
+                    for evt_id in rm.source_event_ids:
+                        for agg_id, events in all_events.items():
+                            for evt in events:
+                                if evt.id == evt_id:
+                                    evt_props = all_properties.get(evt.id, [])
+                                    props_text = ", ".join([f"{p.name}:{p.type}" for p in evt_props])
+                                    source_event_names.append(f"- {evt.name}: [{props_text}]")
+                                    break
+                    source_events_text = "\n".join(source_event_names) if source_event_names else "(No source events found)"
+                
+                # Get supported commands info
+                supported_commands_text = "(No supported commands)"
+                if hasattr(rm, 'supports_command_ids') and rm.supports_command_ids:
+                    cmd_names = []
+                    for cmd_id in rm.supports_command_ids:
+                        for agg_id, commands in all_commands.items():
+                            for cmd in commands:
+                                if cmd.id == cmd_id:
+                                    cmd_names.append(f"- {cmd.name}")
+                                    break
+                    supported_commands_text = "\n".join(cmd_names) if cmd_names else "(No commands found)"
+                
+                prompt = EXTRACT_READMODEL_PROPERTIES_PROMPT.format(
+                    readmodel_name=rm.name,
+                    readmodel_id=rm.id,
+                    bc_name=bc.name,
+                    description=rm.description if hasattr(rm, 'description') else "",
+                    provisioning_type=rm.provisioning_type if hasattr(rm, 'provisioning_type') else "CQRS",
+                    source_events=source_events_text,
+                    supported_commands=supported_commands_text,
+                    user_stories=stories_text
+                )
+                
+                structured_llm = llm.with_structured_output(PropertyList)
+                
+                try:
+                    prop_response = structured_llm.invoke([
+                        SystemMessage(content=SYSTEM_PROMPT),
+                        HumanMessage(content=prompt)
+                    ])
+                    rm_properties = prop_response.properties
+                except Exception as e:
+                    print(f"[ReadModel Properties] Error for {rm.name}: {e}")
+                    rm_properties = []
+                
+                all_properties[rm.id] = rm_properties
+                
+                for prop in rm_properties:
+                    try:
+                        client.create_property(
+                            id=prop.id,
+                            name=prop.name,
+                            parent_id=rm.id,
+                            parent_type="ReadModel",
+                            data_type=prop.type,
+                            description=prop.description if hasattr(prop, 'description') else "",
+                            is_required=prop.is_required if hasattr(prop, 'is_required') else True
+                        )
+                        property_count += 1
+                        
+                        yield ProgressEvent(
+                            phase=IngestionPhase.GENERATING_PROPERTIES,
+                            message=f"Property 생성: {rm.name}.{prop.name}",
+                            progress=99,
+                            data={
+                                "type": "Property",
+                                "object": {
+                                    "id": prop.id,
+                                    "name": prop.name,
+                                    "type": "Property",
+                                    "dataType": prop.type,
+                                    "parentId": rm.id,
+                                    "parentType": "ReadModel"
+                                }
+                            }
+                        )
+                        await asyncio.sleep(0.03)
+                    except Exception:
+                        pass
+        
         # Complete
         yield ProgressEvent(
             phase=IngestionPhase.COMPLETE,
@@ -997,6 +1275,7 @@ async def run_ingestion_workflow(
                     "bounded_contexts": len(bc_candidates),
                     "aggregates": sum(len(aggs) for aggs in all_aggregates.values()),
                     "commands": sum(len(cmds) for cmds in all_commands.values()),
+                    "readmodels": sum(len(rms) for rms in all_readmodels.values()),
                     "events": sum(len(evts) for evts in all_events.values()),
                     "policies": len(policies),
                     "properties": property_count
@@ -1253,3 +1532,37 @@ async def get_data_stats() -> dict[str, Any]:
             "error": str(e)
         }
 
+
+# =============================================================================
+# Cache Control Endpoints
+# =============================================================================
+
+
+@router.get("/cache/status")
+async def get_cache_status() -> dict[str, Any]:
+    """Get current LangChain cache status."""
+    return {
+        "enabled": is_cache_enabled()
+    }
+
+
+@router.post("/cache/enable")
+async def enable_cache() -> dict[str, Any]:
+    """Enable LangChain cache for faster repeated extractions."""
+    success = enable_langchain_cache()
+    return {
+        "success": success,
+        "enabled": is_cache_enabled(),
+        "message": "LangChain 캐시가 활성화되었습니다." if success else "캐시 활성화 실패"
+    }
+
+
+@router.post("/cache/disable")
+async def disable_cache() -> dict[str, Any]:
+    """Disable LangChain cache."""
+    success = disable_langchain_cache()
+    return {
+        "success": success,
+        "enabled": is_cache_enabled(),
+        "message": "LangChain 캐시가 비활성화되었습니다." if success else "캐시 비활성화 실패"
+    }

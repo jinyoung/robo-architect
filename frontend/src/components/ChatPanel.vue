@@ -30,7 +30,9 @@ function getTypeColor(type) {
     aggregate: 'var(--color-aggregate)',
     Aggregate: 'var(--color-aggregate)',
     boundedcontext: 'var(--color-bc)',
-    BoundedContext: 'var(--color-bc)'
+    BoundedContext: 'var(--color-bc)',
+    ui: 'var(--color-ui)',
+    UI: 'var(--color-ui)'
   }
   return colors[type] || 'var(--color-text-light)'
 }
@@ -47,7 +49,9 @@ function getTypeIcon(type) {
     aggregate: 'A',
     Aggregate: 'A',
     boundedcontext: 'BC',
-    BoundedContext: 'BC'
+    BoundedContext: 'BC',
+    ui: 'UI',
+    UI: 'UI'
   }
   return icons[type] || '?'
 }

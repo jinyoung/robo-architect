@@ -97,6 +97,7 @@ You work with these node types:
 - **Policy**: A rule that triggers actions based on events (purple sticky note)
 - **Aggregate**: A cluster of domain objects (yellow sticky note)
 - **BoundedContext**: A logical boundary containing aggregates
+- **UI**: A wireframe/screen for a Command or ReadModel (white sticky note)
 
 When modifying nodes, you should:
 1. Understand the user's intent
@@ -106,7 +107,7 @@ When modifying nodes, you should:
 
 You can perform these actions:
 - **rename**: Change the name of a node
-- **update**: Update properties like description
+- **update**: Update properties like description, or for UI nodes, update the template
 - **create**: Create a new node (MUST include bcId from the selected node's context)
 - **delete**: Remove a node (mark as deleted)
 - **connect**: Create a relationship between nodes
@@ -118,6 +119,14 @@ IMPORTANT:
 - When creating new nodes, ALWAYS include the "bcId" field from the selected node's context.
 - When creating Commands, include "aggregateId" if you know which Aggregate it belongs to.
 - When creating Events, include "commandId" if it's emitted by a Command.
+- When creating or updating UI nodes, include "template" with Vue template HTML for the wireframe.
+- When modifying UI wireframes, use the "update" action with "template" field containing the new HTML.
+
+For UI wireframe templates:
+- Use simple, semantic HTML (form, input, button, label, div)
+- Include Korean labels and placeholder text
+- Structure: title, form fields, action buttons
+- Use CSS classes: form-group, btn-group, wireframe
 
 Current selected nodes context will be provided. Focus modifications on these nodes first,
 but you can suggest changes to related nodes if necessary for consistency.
@@ -303,12 +312,23 @@ async def apply_change(change: Dict[str, Any]) -> bool:
                 return True
                 
             elif action == "update":
-                query = """
-                MATCH (n {id: $target_id})
-                SET n.description = $description, n.updatedAt = datetime()
-                RETURN n.id as id
-                """
-                session.run(query, target_id=target_id, description=change.get("description", ""))
+                # Check if it's a UI template update
+                if change.get("template"):
+                    query = """
+                    MATCH (n {id: $target_id})
+                    SET n.template = $template, n.description = $description, n.updatedAt = datetime()
+                    RETURN n.id as id
+                    """
+                    session.run(query, target_id=target_id, 
+                               template=change.get("template", ""),
+                               description=change.get("description", ""))
+                else:
+                    query = """
+                    MATCH (n {id: $target_id})
+                    SET n.description = $description, n.updatedAt = datetime()
+                    RETURN n.id as id
+                    """
+                    session.run(query, target_id=target_id, description=change.get("description", ""))
                 return True
                 
             elif action == "create":
@@ -383,6 +403,63 @@ async def apply_change(change: Dict[str, Any]) -> bool:
                         """
                         session.run(query, target_id=target_id, name=target_name, 
                                    description=change.get("description", ""))
+                                   
+                elif target_type == "UI":
+                    # Create UI wireframe and link to BC and attached Command/ReadModel
+                    attached_to_id = change.get("attachedToId")
+                    attached_to_type = change.get("attachedToType", "Command")
+                    attached_to_name = change.get("attachedToName", "")
+                    template = change.get("template", "")
+                    
+                    if bc_id:
+                        query = """
+                        MERGE (n:UI {id: $target_id})
+                        SET n.name = $name, 
+                            n.description = $description, 
+                            n.template = $template,
+                            n.attachedToId = $attached_to_id,
+                            n.attachedToType = $attached_to_type,
+                            n.attachedToName = $attached_to_name,
+                            n.createdAt = datetime()
+                        WITH n
+                        MATCH (bc:BoundedContext {id: $bc_id})
+                        MERGE (bc)-[:HAS_UI]->(n)
+                        RETURN n.id as id
+                        """
+                        session.run(query, target_id=target_id, name=target_name, 
+                                   description=change.get("description", ""),
+                                   template=template,
+                                   attached_to_id=attached_to_id,
+                                   attached_to_type=attached_to_type,
+                                   attached_to_name=attached_to_name,
+                                   bc_id=bc_id)
+                        
+                        # Also create ATTACHED_TO relationship if attached_to_id is provided
+                        if attached_to_id:
+                            attach_query = f"""
+                            MATCH (ui:UI {{id: $ui_id}})
+                            MATCH (target:{attached_to_type} {{id: $attached_to_id}})
+                            MERGE (ui)-[:ATTACHED_TO]->(target)
+                            """
+                            session.run(attach_query, ui_id=target_id, attached_to_id=attached_to_id)
+                    else:
+                        query = """
+                        MERGE (n:UI {id: $target_id})
+                        SET n.name = $name, 
+                            n.description = $description, 
+                            n.template = $template,
+                            n.attachedToId = $attached_to_id,
+                            n.attachedToType = $attached_to_type,
+                            n.attachedToName = $attached_to_name,
+                            n.createdAt = datetime()
+                        RETURN n.id as id
+                        """
+                        session.run(query, target_id=target_id, name=target_name, 
+                                   description=change.get("description", ""),
+                                   template=template,
+                                   attached_to_id=attached_to_id,
+                                   attached_to_type=attached_to_type,
+                                   attached_to_name=attached_to_name)
                 else:
                     return False
                 

@@ -287,6 +287,7 @@ export const useNavigatorStore = defineStore('navigator', () => {
         id: bcId,
         aggregates: [],
         policies: [],
+        readmodels: [],
         userStories: []
       }
     }
@@ -308,7 +309,41 @@ export const useNavigatorStore = defineStore('navigator', () => {
     }
   }
   
-  // Dynamically add a Property to an object (Aggregate, Command, Event)
+  // Dynamically add a ReadModel to a BC (used during ingestion)
+  function addReadModel(readModelData) {
+    const bcId = readModelData.parentId
+    
+    // Ensure the tree exists
+    if (!contextTrees.value[bcId]) {
+      contextTrees.value[bcId] = {
+        id: bcId,
+        aggregates: [],
+        policies: [],
+        readmodels: [],
+        userStories: []
+      }
+    }
+    
+    const tree = contextTrees.value[bcId]
+    if (!tree.readmodels) tree.readmodels = []
+    
+    const exists = tree.readmodels.some(rm => rm.id === readModelData.id)
+    if (!exists) {
+      tree.readmodels.push({
+        id: readModelData.id,
+        name: readModelData.name,
+        type: 'ReadModel',
+        provisioningType: readModelData.provisioningType || 'CQRS'
+      })
+      
+      // Force reactivity update
+      contextTrees.value = { ...contextTrees.value }
+      
+      markAsNew(readModelData.id)
+    }
+  }
+  
+  // Dynamically add a Property to an object (Aggregate, Command, Event, ReadModel)
   function addProperty(propertyData) {
     const parentId = propertyData.parentId
     const parentType = propertyData.parentType
@@ -316,6 +351,26 @@ export const useNavigatorStore = defineStore('navigator', () => {
     // Find the parent object in the trees
     for (const bcId in contextTrees.value) {
       const tree = contextTrees.value[bcId]
+      
+      // Check if parent is a ReadModel
+      if (parentType === 'ReadModel') {
+        const readModel = tree.readmodels?.find(rm => rm.id === parentId)
+        if (readModel) {
+          if (!readModel.properties) readModel.properties = []
+          const exists = readModel.properties.some(p => p.id === propertyData.id)
+          if (!exists) {
+            readModel.properties.push({
+              id: propertyData.id,
+              name: propertyData.name,
+              type: 'Property',
+              dataType: propertyData.dataType
+            })
+            contextTrees.value = { ...contextTrees.value }
+            markAsNew(propertyData.id)
+          }
+          return
+        }
+      }
       
       for (const aggregate of (tree.aggregates || [])) {
         // Check if parent is this aggregate
@@ -504,6 +559,7 @@ export const useNavigatorStore = defineStore('navigator', () => {
     addCommand,
     addEvent,
     addPolicy,
+    addReadModel,
     addProperty,
     addItemToTree,
     isNewlyAdded,

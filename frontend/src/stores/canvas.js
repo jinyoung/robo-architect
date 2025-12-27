@@ -40,6 +40,16 @@ export const useCanvasStore = defineStore('canvas', () => {
       width: 160,
       height: 80
     },
+    ReadModel: { 
+      color: '#40c057',  // 녹색 스티커
+      width: 160,
+      height: 90
+    },
+    UI: {
+      color: '#ffffff',  // 흰색 스티커
+      width: 120,
+      height: 100
+    },
     BoundedContext: { 
       color: '#373a40', 
       width: 400,
@@ -341,12 +351,14 @@ export const useCanvasStore = defineStore('canvas', () => {
     const nodeWidth = nodeTypeConfig[nodeType]?.width || 140
     const nodeHeight = nodeTypeConfig[nodeType]?.height || 80
     
-    // Layout: Aggregates on left, Commands/Events flow to the right
+    // Layout: Aggregates on left, Commands/Events flow to the right, ReadModel at bottom
     const typeOffsets = {
-      Aggregate: { x: 30, baseY: headerHeight + 20 },
-      Command: { x: 200, baseY: headerHeight + 20 },
-      Event: { x: 380, baseY: headerHeight + 20 },
-      Policy: { x: 290, baseY: headerHeight + 150 }
+      UI: { x: 30, baseY: headerHeight + 20 },  // UI 스티커: Command/ReadModel 왼쪽
+      Aggregate: { x: 180, baseY: headerHeight + 20 },
+      Command: { x: 350, baseY: headerHeight + 20 },
+      Event: { x: 520, baseY: headerHeight + 20 },
+      Policy: { x: 430, baseY: headerHeight + 150 },
+      ReadModel: { x: 180, baseY: headerHeight + 230 }
     }
     
     const offset = typeOffsets[nodeType] || { x: 30, baseY: headerHeight + 20 }
@@ -503,11 +515,11 @@ export const useCanvasStore = defineStore('canvas', () => {
           parentBcId = bcContext.id
         }
         
-        // If still not found, look for HAS_AGGREGATE or HAS_POLICY relationship
+        // If still not found, look for HAS_AGGREGATE, HAS_POLICY, or HAS_READMODEL relationship
         if (!parentBcId) {
           const parentRel = relationships.find(r => 
             r.target === nodeData.id && 
-            (r.type === 'HAS_AGGREGATE' || r.type === 'HAS_POLICY')
+            (r.type === 'HAS_AGGREGATE' || r.type === 'HAS_POLICY' || r.type === 'HAS_READMODEL')
           )
           if (parentRel) {
             parentBcId = parentRel.source
@@ -564,12 +576,14 @@ export const useCanvasStore = defineStore('canvas', () => {
         }
         
         // Add children with proper layout
-        // Layout: Policy(왼쪽) → Command(왼쪽) → Aggregate(중앙) → Event(오른쪽)
+        // Layout: UI(맨 왼쪽) → Policy(왼쪽) → Command(왼쪽) → Aggregate(중앙) → Event(오른쪽) → ReadModel(아래)
         const typeGroups = {
+          UI: [],
           Aggregate: [],
           Command: [],
           Event: [],
-          Policy: []
+          Policy: [],
+          ReadModel: []
         }
         
         children.forEach(child => {
@@ -695,6 +709,65 @@ export const useCanvasStore = defineStore('canvas', () => {
             newNodes.push(node)
           } else {
             ensureNodeParenting(pol.id, bcId)
+          }
+        })
+        
+        // Layout ReadModels (bottom row, spanning horizontally)
+        const readModelY = Math.max(
+          typeGroups.Command.length,
+          typeGroups.Event.length,
+          typeGroups.Aggregate.length
+        ) * (nodeHeight + gapY) + currentY + 30
+        const readModelX = padding + 100
+        
+        typeGroups.ReadModel.forEach((rm, idx) => {
+          if (!isOnCanvas(rm.id)) {
+            const node = {
+              id: rm.id,
+              type: 'readmodel',
+              position: { x: readModelX + idx * 180, y: readModelY },
+              data: { ...rm, label: rm.name, bcId: bcId },
+              parentNode: bcId,
+              extent: 'parent'
+            }
+            nodes.value.push(node)
+            newNodes.push(node)
+          } else {
+            ensureNodeParenting(rm.id, bcId)
+          }
+        })
+        
+        // Layout UI stickers (positioned to the left of their attached Command/ReadModel)
+        const uiX = padding - 80  // Left of all other nodes
+        typeGroups.UI.forEach((ui, idx) => {
+          if (!isOnCanvas(ui.id)) {
+            // Find the attached node to align vertically
+            let yPos = currentY + idx * (nodeHeight + gapY)
+            
+            if (ui.attachedToId) {
+              // Find attached Command position
+              if (commandPositions[ui.attachedToId]) {
+                yPos = commandPositions[ui.attachedToId].y
+              }
+              // Or find attached ReadModel position (in ReadModel row)
+              const attachedRmIdx = typeGroups.ReadModel.findIndex(rm => rm.id === ui.attachedToId)
+              if (attachedRmIdx >= 0) {
+                yPos = readModelY
+              }
+            }
+            
+            const node = {
+              id: ui.id,
+              type: 'ui',
+              position: { x: uiX, y: yPos },
+              data: { ...ui, label: ui.name, bcId: bcId },
+              parentNode: bcId,
+              extent: 'parent'
+            }
+            nodes.value.push(node)
+            newNodes.push(node)
+          } else {
+            ensureNodeParenting(ui.id, bcId)
           }
         })
         
@@ -1244,7 +1317,7 @@ export const useCanvasStore = defineStore('canvas', () => {
         const policyX = padding - 100
         
         // Group by type
-        const typeGroups = { Aggregate: [], Command: [], Event: [], Policy: [] }
+        const typeGroups = { UI: [], Aggregate: [], Command: [], Event: [], Policy: [] }
         children.forEach(child => {
           if (!isOnCanvas(child.id) && typeGroups[child.type]) {
             typeGroups[child.type].push(child)

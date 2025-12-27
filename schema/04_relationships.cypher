@@ -174,6 +174,104 @@ MATCH (prop:Property {id: "PROP-EVT-ORDER-CANCELLED-CANCELLEDAT"})
 CREATE (evt)-[:HAS_PROPERTY]->(prop);
 
 
+// ############################################################
+// 10. HAS_READMODEL
+// ############################################################
+// 방향: BoundedContext → ReadModel
+// 의미: BC가 해당 ReadModel을 소유함
+//       ReadModel은 다른 BC의 Event를 구독하여 Query용 데이터 저장
+// ############################################################
+
+MATCH (bc:BoundedContext {id: "BC-MYPAGE"})
+MATCH (rm:ReadModel {id: "RM-MYPAGE-ORDER-STATUS"})
+CREATE (bc)-[:HAS_READMODEL]->(rm);
+
+
+// ############################################################
+// 11. POPULATES
+// ############################################################
+// 방향: Event → ReadModel
+// 의미: Event가 ReadModel에 데이터를 적재함 (CQRS 패턴)
+//       CREATE/UPDATE/DELETE 규칙에 따라 ReadModel 갱신
+//
+// 속성:
+//   - action: String ("CREATE", "UPDATE", "DELETE")
+//   - mappingConfig: String (JSON) - 필드 매핑 설정
+// ############################################################
+
+MATCH (evt:Event {id: "EVT-ORDER-PLACED"})
+MATCH (rm:ReadModel {id: "RM-MYPAGE-ORDER-STATUS"})
+CREATE (evt)-[:POPULATES {
+    action: "CREATE",
+    mappingConfig: '{"orderId": "id", "productId": "productId", "orderStatus": "주문됨"}'
+}]->(rm);
+
+MATCH (evt:Event {id: "EVT-DELIVERY-STARTED"})
+MATCH (rm:ReadModel {id: "RM-MYPAGE-ORDER-STATUS"})
+CREATE (evt)-[:POPULATES {
+    action: "UPDATE",
+    mappingConfig: '{"deliveryStatus": "배송됨"}',
+    whereCondition: '{"orderId": "orderId"}'
+}]->(rm);
+
+
+// ############################################################
+// 12. SUPPORTS
+// ############################################################
+// 방향: ReadModel → Command
+// 의미: ReadModel이 해당 Command 수행에 필요한 데이터를 제공
+//       User가 ReadModel 조회 후 Command 실행하는 시나리오
+// ############################################################
+
+MATCH (rm:ReadModel {id: "RM-MYPAGE-ORDER-STATUS"})
+MATCH (cmd:Command {id: "CMD-CANCEL-ORDER"})
+CREATE (rm)-[:SUPPORTS]->(cmd);
+
+
+// ReadModel에 대한 HAS_PROPERTY 관계
+MATCH (rm:ReadModel {id: "RM-MYPAGE-ORDER-STATUS"})
+MATCH (prop:Property {id: "PROP-RM-MYPAGE-ORDERID"})
+CREATE (rm)-[:HAS_PROPERTY]->(prop);
+
+MATCH (rm:ReadModel {id: "RM-MYPAGE-ORDER-STATUS"})
+MATCH (prop:Property {id: "PROP-RM-MYPAGE-PRODUCTID"})
+CREATE (rm)-[:HAS_PROPERTY]->(prop);
+
+MATCH (rm:ReadModel {id: "RM-MYPAGE-ORDER-STATUS"})
+MATCH (prop:Property {id: "PROP-RM-MYPAGE-ORDERSTATUS"})
+CREATE (rm)-[:HAS_PROPERTY]->(prop);
+
+MATCH (rm:ReadModel {id: "RM-MYPAGE-ORDER-STATUS"})
+MATCH (prop:Property {id: "PROP-RM-MYPAGE-DELIVERYSTATUS"})
+CREATE (rm)-[:HAS_PROPERTY]->(prop);
+
+
+// ############################################################
+// 13. HAS_UI
+// ############################################################
+// 방향: BoundedContext → UI
+// 의미: BC가 해당 UI 와이어프레임을 소유함
+//       UI는 Command 또는 ReadModel에 부착되어 화면 구조 정의
+// ############################################################
+
+MATCH (bc:BoundedContext {id: "BC-ORDER"})
+MATCH (ui:UI {id: "UI-ORDER-CANCELORDER"})
+CREATE (bc)-[:HAS_UI]->(ui);
+
+
+// ############################################################
+// 14. ATTACHED_TO
+// ############################################################
+// 방향: UI → Command / ReadModel
+// 의미: UI가 특정 Command 또는 ReadModel에 부착됨
+//       UI는 해당 Command의 입력 폼 또는 ReadModel의 조회 화면
+// ############################################################
+
+MATCH (ui:UI {id: "UI-ORDER-CANCELORDER"})
+MATCH (cmd:Command {id: "CMD-CANCEL-ORDER"})
+CREATE (ui)-[:ATTACHED_TO]->(cmd);
+
+
 // ============================================================
 // Event Storming Flow 시각화
 // ============================================================

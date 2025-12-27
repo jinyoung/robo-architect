@@ -25,6 +25,8 @@ from agent.prompts import (
     EXTRACT_AGGREGATES_PROMPT,
     EXTRACT_COMMANDS_PROMPT,
     EXTRACT_EVENTS_PROMPT,
+    EXTRACT_READMODELS_PROMPT,
+    GENERATE_UI_PROMPT,
     IDENTIFY_BC_FROM_STORIES_PROMPT,
     IDENTIFY_POLICIES_PROMPT,
     SYSTEM_PROMPT,
@@ -39,6 +41,8 @@ from agent.state import (
     EventStormingState,
     PolicyCandidate,
     PropertyCandidate,
+    ReadModelCandidate,
+    UICandidate,
     UserStoryBreakdown,
     WorkflowPhase,
     format_user_story,
@@ -86,6 +90,21 @@ class PropertyList(BaseModel):
     properties: List[PropertyCandidate] = Field(
         description="List of properties/fields for the object"
     )
+
+
+class ReadModelList(BaseModel):
+    """List of ReadModel candidates."""
+    readmodels: List[ReadModelCandidate] = Field(
+        description="List of identified ReadModels (Query Models)"
+    )
+
+
+class UIList(BaseModel):
+    """List of UI candidates."""
+    uis: List[UICandidate] = Field(
+        description="List of UI wireframe candidates"
+    )
+
 
 load_dotenv()
 
@@ -436,10 +455,98 @@ def extract_commands_node(state: EventStormingState) -> Dict[str, Any]:
 
     return {
         "command_candidates": command_candidates,
+        "phase": WorkflowPhase.EXTRACT_READMODELS,
+        "messages": [
+            AIMessage(
+                content=f"Extracted commands for all aggregates. Moving to ReadModel extraction..."
+            )
+        ],
+    }
+
+
+# =============================================================================
+# ReadModel Extraction (CQRS / Query Models)
+# =============================================================================
+
+
+def extract_readmodels_node(state: EventStormingState) -> Dict[str, Any]:
+    """Extract ReadModels for Commands that need external data."""
+    llm = get_llm()
+    readmodel_candidates = dict(state.readmodel_candidates)
+
+    for bc in state.approved_bcs:
+        bc_id = bc.id
+        bc_id_short = bc.id.replace("BC-", "")
+        
+        # Get commands for this BC
+        bc_commands = []
+        for agg in state.approved_aggregates.get(bc_id, []):
+            for cmd in state.command_candidates.get(agg.id, []):
+                bc_commands.append(cmd)
+        
+        if not bc_commands:
+            continue
+        
+        # Format commands for the prompt
+        commands_text = "\n".join([
+            f"- {cmd.name}: {cmd.description} (implements: {cmd.user_story_ids})"
+            for cmd in bc_commands
+        ])
+        
+        # Get events from OTHER BCs (potential sources for CQRS)
+        other_bc_events = []
+        for other_bc in state.approved_bcs:
+            if other_bc.id == bc_id:
+                continue
+            other_bc_short = other_bc.id.replace("BC-", "")
+            for agg in state.approved_aggregates.get(other_bc.id, []):
+                for evt_list in [state.event_candidates.get(agg.id, [])]:
+                    for evt in evt_list:
+                        other_bc_events.append(
+                            f"- {evt.name} (from {other_bc.name}): {evt.description}"
+                        )
+        
+        # If no events from other BCs yet (events not extracted), use placeholder
+        if not other_bc_events:
+            other_bc_events = ["(Events not yet extracted - will be populated after Event extraction)"]
+        
+        other_bc_events_text = "\n".join(other_bc_events)
+        
+        # Get user stories for this BC
+        bc_stories = [us for us in state.user_stories if us["id"] in bc.user_story_ids]
+        stories_text = "\n".join([
+            f"- [{us['id']}] {format_user_story(us)}"
+            for us in bc_stories
+        ])
+        
+        prompt = EXTRACT_READMODELS_PROMPT.format(
+            bc_name=bc.name,
+            bc_id=bc_id,
+            bc_description=bc.description,
+            commands=commands_text,
+            other_bc_events=other_bc_events_text,
+            user_stories=stories_text,
+        )
+        
+        try:
+            structured_llm = llm.with_structured_output(ReadModelList)
+            response = structured_llm.invoke([
+                SystemMessage(content=SYSTEM_PROMPT),
+                HumanMessage(content=prompt)
+            ])
+            readmodels = response.readmodels
+        except Exception:
+            readmodels = []
+        
+        if readmodels:
+            readmodel_candidates[bc_id] = readmodels
+
+    return {
+        "readmodel_candidates": readmodel_candidates,
         "phase": WorkflowPhase.EXTRACT_EVENTS,
         "messages": [
             AIMessage(
-                content=f"Extracted commands for all aggregates. Moving to event extraction..."
+                content=f"Extracted ReadModels for {len(readmodel_candidates)} BCs. Moving to event extraction..."
             )
         ],
     }
@@ -490,10 +597,148 @@ def extract_events_node(state: EventStormingState) -> Dict[str, Any]:
 
     return {
         "event_candidates": event_candidates,
+        "phase": WorkflowPhase.GENERATE_UI,
+        "messages": [
+            AIMessage(
+                content="Extracted events for all commands. Generating UI wireframes..."
+            )
+        ],
+    }
+
+
+# =============================================================================
+# UI Wireframe Generation
+# =============================================================================
+
+
+def generate_ui_node(state: EventStormingState) -> Dict[str, Any]:
+    """Generate UI wireframes for Commands and ReadModels that have UI descriptions in User Stories."""
+    llm = get_llm()
+    ui_candidates = dict(state.ui_candidates)
+
+    for bc in state.approved_bcs:
+        bc_id = bc.id
+        bc_name = bc.name
+        bc_short = bc.id.replace("BC-", "")
+        bc_uis = []
+
+        # Get user stories for this BC
+        bc_stories = [us for us in state.user_stories if us["id"] in bc.user_story_ids]
+
+        # Find user stories that mention UI-related keywords
+        ui_keywords = ["화면", "UI", "페이지", "폼", "입력", "표시", "보여", "조회", "view", "screen", "form", "display"]
+
+        for us in bc_stories:
+            # Check if user story mentions UI
+            story_text = f"{us.get('action', '')} {us.get('benefit', '')}".lower()
+            has_ui_mention = any(kw.lower() in story_text for kw in ui_keywords)
+
+            if not has_ui_mention:
+                continue
+
+            us_id = us["id"]
+
+            # Find Commands that implement this user story
+            for agg in state.approved_aggregates.get(bc_id, []):
+                for cmd in state.command_candidates.get(agg.id, []):
+                    if us_id in cmd.user_story_ids:
+                        # Generate UI for this Command
+                        ui_id = f"UI-{bc_short}-{cmd.name.upper()}"
+
+                        # Check if already generated
+                        if any(u.id == ui_id for u in bc_uis):
+                            continue
+
+                        # Get command properties if available
+                        cmd_props_text = "No properties defined yet"
+
+                        # Get aggregate info
+                        agg_info = f"{agg.name}: {agg.description}"
+
+                        prompt = GENERATE_UI_PROMPT.format(
+                            target_type="Command",
+                            target_name=cmd.name,
+                            target_id=cmd.id,
+                            bc_name=bc_name,
+                            description=cmd.description,
+                            user_story=format_user_story(us),
+                            properties=cmd_props_text,
+                            aggregate_info=agg_info,
+                        )
+
+                        try:
+                            structured_llm = llm.with_structured_output(UICandidate)
+                            response = structured_llm.invoke([
+                                SystemMessage(content=SYSTEM_PROMPT),
+                                HumanMessage(content=prompt)
+                            ])
+
+                            # Ensure proper ID and references
+                            response.id = ui_id
+                            response.attached_to_id = cmd.id
+                            response.attached_to_type = "Command"
+                            response.attached_to_name = cmd.name
+                            response.user_story_id = us_id
+                            response.user_story_ids = [us_id]
+
+                            bc_uis.append(response)
+                        except Exception as e:
+                            print(f"Failed to generate UI for {cmd.name}: {e}")
+                            continue
+
+            # Find ReadModels that implement this user story
+            for rm in state.readmodel_candidates.get(bc_id, []):
+                if us_id in rm.user_story_ids:
+                    # Generate UI for this ReadModel
+                    ui_id = f"UI-{bc_short}-{rm.name.upper()}"
+
+                    # Check if already generated
+                    if any(u.id == ui_id for u in bc_uis):
+                        continue
+
+                    # Get ReadModel properties if available
+                    rm_props_text = f"Description: {rm.description}"
+
+                    prompt = GENERATE_UI_PROMPT.format(
+                        target_type="ReadModel",
+                        target_name=rm.name,
+                        target_id=rm.id,
+                        bc_name=bc_name,
+                        description=rm.description,
+                        user_story=format_user_story(us),
+                        properties=rm_props_text,
+                        aggregate_info="N/A (ReadModel)",
+                    )
+
+                    try:
+                        structured_llm = llm.with_structured_output(UICandidate)
+                        response = structured_llm.invoke([
+                            SystemMessage(content=SYSTEM_PROMPT),
+                            HumanMessage(content=prompt)
+                        ])
+
+                        # Ensure proper ID and references
+                        response.id = ui_id
+                        response.attached_to_id = rm.id
+                        response.attached_to_type = "ReadModel"
+                        response.attached_to_name = rm.name
+                        response.user_story_id = us_id
+                        response.user_story_ids = [us_id]
+
+                        bc_uis.append(response)
+                    except Exception as e:
+                        print(f"Failed to generate UI for {rm.name}: {e}")
+                        continue
+
+        if bc_uis:
+            ui_candidates[bc_id] = bc_uis
+
+    return {
+        "ui_candidates": ui_candidates,
         "phase": WorkflowPhase.IDENTIFY_POLICIES,
         "messages": [
             AIMessage(
-                content="Extracted events for all commands. Identifying cross-BC policies..."
+                content=f"Generated {sum(len(uis) for uis in ui_candidates.values())} UI wireframes. Identifying cross-BC policies..."
             )
         ],
     }
@@ -701,7 +946,40 @@ def save_to_graph_node(state: EventStormingState) -> Dict[str, Any]:
                         except Exception:
                             pass  # User story might not exist
 
-        # 5. Create Policies
+        # 5. Create ReadModels and link to Events/Commands
+        for bc_id, readmodels in state.readmodel_candidates.items():
+            for rm in readmodels:
+                # Convert CQRS config to JSON string if present
+                cqrs_config_str = None
+                if rm.cqrs_config:
+                    import json
+                    cqrs_config_str = json.dumps(rm.cqrs_config.model_dump())
+                
+                client.create_readmodel(
+                    id=rm.id,
+                    name=rm.name,
+                    bc_id=bc_id,
+                    description=rm.description,
+                    provisioning_type=rm.provisioning_type,
+                    cqrs_config=cqrs_config_str,
+                )
+                saved_items.append(f"  ReadModel: {rm.name}")
+
+                # Link source events to ReadModel (POPULATES)
+                for evt_id in rm.source_event_ids:
+                    try:
+                        client.link_event_to_readmodel(evt_id, rm.id)
+                    except Exception:
+                        pass  # Event might not exist
+
+                # Link ReadModel to Commands it supports (SUPPORTS)
+                for cmd_id in rm.supports_command_ids:
+                    try:
+                        client.link_readmodel_to_command(rm.id, cmd_id)
+                    except Exception:
+                        pass  # Command might not exist
+
+        # 6. Create Policies
         for pol in state.approved_policies:
             # Find the event and command IDs
             trigger_event_id = None
@@ -735,6 +1013,25 @@ def save_to_graph_node(state: EventStormingState) -> Dict[str, Any]:
                     description=pol.description,
                 )
                 saved_items.append(f"  Policy: {pol.name}")
+
+        # 7. Create UI Wireframes
+        for bc_id, uis in state.ui_candidates.items():
+            for ui in uis:
+                try:
+                    client.create_ui(
+                        id=ui.id,
+                        name=ui.name,
+                        bc_id=bc_id,
+                        template=ui.template,
+                        attached_to_id=ui.attached_to_id,
+                        attached_to_type=ui.attached_to_type,
+                        attached_to_name=ui.attached_to_name,
+                        user_story_id=ui.user_story_id,
+                        description=ui.description,
+                    )
+                    saved_items.append(f"  UI: {ui.name}")
+                except Exception as e:
+                    print(f"Failed to save UI {ui.name}: {e}")
 
         return {
             "phase": WorkflowPhase.COMPLETE,
@@ -781,7 +1078,9 @@ def route_by_phase(state: EventStormingState) -> str:
         WorkflowPhase.EXTRACT_AGGREGATES: "extract_aggregates",
         WorkflowPhase.APPROVE_AGGREGATES: "approve_aggregates",
         WorkflowPhase.EXTRACT_COMMANDS: "extract_commands",
+        WorkflowPhase.EXTRACT_READMODELS: "extract_readmodels",
         WorkflowPhase.EXTRACT_EVENTS: "extract_events",
+        WorkflowPhase.GENERATE_UI: "generate_ui",
         WorkflowPhase.IDENTIFY_POLICIES: "identify_policies",
         WorkflowPhase.APPROVE_POLICIES: "approve_policies",
         WorkflowPhase.SAVE_TO_GRAPH: "save_to_graph",

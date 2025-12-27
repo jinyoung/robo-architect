@@ -335,6 +335,24 @@ class Neo4jClient:
             )
             return result.single() is not None
 
+    def link_user_story_to_readmodel(
+        self, user_story_id: str, readmodel_id: str, confidence: float = 0.9
+    ) -> bool:
+        """Link a user story to a ReadModel via IMPLEMENTS relationship."""
+        query = """
+        MATCH (us:UserStory {id: $user_story_id})
+        MATCH (rm:ReadModel {id: $readmodel_id})
+        MERGE (us)-[r:IMPLEMENTS]->(rm)
+        SET r.confidence = $confidence,
+            r.createdAt = datetime()
+        RETURN us.id, rm.id
+        """
+        with self.session() as session:
+            result = session.run(
+                query, user_story_id=user_story_id, readmodel_id=readmodel_id, confidence=confidence
+            )
+            return result.single() is not None
+
     # =========================================================================
     # Command Operations
     # =========================================================================
@@ -517,6 +535,257 @@ class Neo4jClient:
         with self.session() as session:
             result = session.run(query, parent_id=parent_id)
             return [dict(record["property"]) for record in result]
+
+    # =========================================================================
+    # ReadModel Operations (CQRS / Query Models)
+    # =========================================================================
+
+    def create_readmodel(
+        self,
+        id: str,
+        name: str,
+        bc_id: str,
+        description: str | None = None,
+        provisioning_type: str = "CQRS",
+        cqrs_config: str | None = None,
+    ) -> dict[str, Any]:
+        """
+        Create a ReadModel node and link it to a Bounded Context.
+        
+        Uses HAS_READMODEL relationship.
+        """
+        query = """
+        MATCH (bc:BoundedContext {id: $bc_id})
+        MERGE (rm:ReadModel {id: $id})
+        SET rm.name = $name,
+            rm.description = $description,
+            rm.provisioningType = $provisioning_type,
+            rm.cqrsConfig = $cqrs_config
+        MERGE (bc)-[:HAS_READMODEL]->(rm)
+        RETURN rm {.id, .name, .description, .provisioningType} as readmodel
+        """
+        with self.session() as session:
+            result = session.run(
+                query,
+                id=id,
+                name=name,
+                bc_id=bc_id,
+                description=description,
+                provisioning_type=provisioning_type,
+                cqrs_config=cqrs_config,
+            )
+            record = result.single()
+            return dict(record["readmodel"]) if record else {}
+
+    def get_readmodels_by_bc(self, bc_id: str) -> list[dict[str, Any]]:
+        """Fetch ReadModels belonging to a bounded context."""
+        query = """
+        MATCH (bc:BoundedContext {id: $bc_id})-[:HAS_READMODEL]->(rm:ReadModel)
+        OPTIONAL MATCH (rm)-[:HAS_PROPERTY]->(prop:Property)
+        WITH rm, collect(DISTINCT prop {.id, .name, .type}) as properties
+        RETURN {
+            id: rm.id,
+            name: rm.name,
+            description: rm.description,
+            provisioningType: rm.provisioningType,
+            cqrsConfig: rm.cqrsConfig,
+            properties: properties
+        } as readmodel
+        ORDER BY readmodel.name
+        """
+        with self.session() as session:
+            result = session.run(query, bc_id=bc_id)
+            return [dict(record["readmodel"]) for record in result]
+
+    def link_event_to_readmodel(
+        self,
+        event_id: str,
+        readmodel_id: str,
+        action: str = "CREATE",
+        mapping_config: str | None = None,
+        where_condition: str | None = None,
+    ) -> bool:
+        """
+        Link an Event to a ReadModel via POPULATES relationship.
+        
+        This represents the CQRS pattern where Events populate ReadModels.
+        """
+        query = """
+        MATCH (evt:Event {id: $event_id})
+        MATCH (rm:ReadModel {id: $readmodel_id})
+        MERGE (evt)-[r:POPULATES]->(rm)
+        SET r.action = $action,
+            r.mappingConfig = $mapping_config,
+            r.whereCondition = $where_condition
+        RETURN evt.id, rm.id
+        """
+        with self.session() as session:
+            result = session.run(
+                query,
+                event_id=event_id,
+                readmodel_id=readmodel_id,
+                action=action,
+                mapping_config=mapping_config,
+                where_condition=where_condition,
+            )
+            return result.single() is not None
+
+    def link_readmodel_to_command(
+        self,
+        readmodel_id: str,
+        command_id: str,
+    ) -> bool:
+        """
+        Link a ReadModel to a Command via SUPPORTS relationship.
+        
+        This indicates that the ReadModel provides data needed for the Command.
+        """
+        query = """
+        MATCH (rm:ReadModel {id: $readmodel_id})
+        MATCH (cmd:Command {id: $command_id})
+        MERGE (rm)-[r:SUPPORTS]->(cmd)
+        RETURN rm.id, cmd.id
+        """
+        with self.session() as session:
+            result = session.run(
+                query,
+                readmodel_id=readmodel_id,
+                command_id=command_id,
+            )
+            return result.single() is not None
+
+    def get_events_for_readmodel(self, readmodel_id: str) -> list[dict[str, Any]]:
+        """Get all Events that populate a ReadModel."""
+        query = """
+        MATCH (evt:Event)-[r:POPULATES]->(rm:ReadModel {id: $readmodel_id})
+        RETURN {
+            id: evt.id,
+            name: evt.name,
+            action: r.action,
+            mappingConfig: r.mappingConfig,
+            whereCondition: r.whereCondition
+        } as event_mapping
+        ORDER BY evt.name
+        """
+        with self.session() as session:
+            result = session.run(query, readmodel_id=readmodel_id)
+            return [dict(record["event_mapping"]) for record in result]
+
+    def get_commands_supported_by_readmodel(self, readmodel_id: str) -> list[dict[str, Any]]:
+        """Get all Commands that a ReadModel supports."""
+        query = """
+        MATCH (rm:ReadModel {id: $readmodel_id})-[:SUPPORTS]->(cmd:Command)
+        RETURN cmd {.id, .name, .actor} as command
+        ORDER BY cmd.name
+        """
+        with self.session() as session:
+            result = session.run(query, readmodel_id=readmodel_id)
+            return [dict(record["command"]) for record in result]
+
+    # =========================================================================
+    # UI Wireframe Operations
+    # =========================================================================
+
+    def create_ui(
+        self,
+        id: str,
+        name: str,
+        bc_id: str,
+        template: str | None = None,
+        attached_to_id: str | None = None,
+        attached_to_type: str | None = None,
+        attached_to_name: str | None = None,
+        user_story_id: str | None = None,
+        description: str | None = None,
+    ) -> dict[str, Any]:
+        """
+        Create a UI wireframe node and link it to its attached Command/ReadModel.
+        
+        Uses ATTACHED_TO relationship to link UI to Command or ReadModel.
+        Uses HAS_UI relationship to link BC to UI.
+        """
+        query = """
+        MATCH (bc:BoundedContext {id: $bc_id})
+        MERGE (ui:UI {id: $id})
+        SET ui.name = $name,
+            ui.template = $template,
+            ui.attachedToId = $attached_to_id,
+            ui.attachedToType = $attached_to_type,
+            ui.attachedToName = $attached_to_name,
+            ui.userStoryId = $user_story_id,
+            ui.description = $description
+        MERGE (bc)-[:HAS_UI]->(ui)
+        RETURN ui {.id, .name, .template, .attachedToId, .attachedToType} as ui_node
+        """
+        with self.session() as session:
+            result = session.run(
+                query,
+                id=id,
+                name=name,
+                bc_id=bc_id,
+                template=template,
+                attached_to_id=attached_to_id,
+                attached_to_type=attached_to_type,
+                attached_to_name=attached_to_name,
+                user_story_id=user_story_id,
+                description=description,
+            )
+            record = result.single()
+            if record:
+                # Also create ATTACHED_TO relationship if attached_to_id is provided
+                if attached_to_id and attached_to_type:
+                    self._link_ui_to_target(id, attached_to_id, attached_to_type)
+                return dict(record["ui_node"])
+            return {}
+
+    def _link_ui_to_target(
+        self,
+        ui_id: str,
+        target_id: str,
+        target_type: str,
+    ) -> bool:
+        """Link UI to its target Command or ReadModel via ATTACHED_TO relationship."""
+        query = f"""
+        MATCH (ui:UI {{id: $ui_id}})
+        MATCH (target:{target_type} {{id: $target_id}})
+        MERGE (ui)-[:ATTACHED_TO]->(target)
+        RETURN ui.id, target.id
+        """
+        with self.session() as session:
+            result = session.run(query, ui_id=ui_id, target_id=target_id)
+            return result.single() is not None
+
+    def get_uis_by_bc(self, bc_id: str) -> list[dict[str, Any]]:
+        """Fetch UI wireframes belonging to a bounded context."""
+        query = """
+        MATCH (bc:BoundedContext {id: $bc_id})-[:HAS_UI]->(ui:UI)
+        RETURN {
+            id: ui.id,
+            name: ui.name,
+            template: ui.template,
+            attachedToId: ui.attachedToId,
+            attachedToType: ui.attachedToType,
+            attachedToName: ui.attachedToName,
+            userStoryId: ui.userStoryId,
+            description: ui.description
+        } as ui_node
+        ORDER BY ui.name
+        """
+        with self.session() as session:
+            result = session.run(query, bc_id=bc_id)
+            return [dict(record["ui_node"]) for record in result]
+
+    def update_ui_template(self, ui_id: str, template: str) -> bool:
+        """Update the template of a UI wireframe."""
+        query = """
+        MATCH (ui:UI {id: $ui_id})
+        SET ui.template = $template,
+            ui.updatedAt = datetime()
+        RETURN ui.id
+        """
+        with self.session() as session:
+            result = session.run(query, ui_id=ui_id, template=template)
+            return result.single() is not None
 
     # =========================================================================
     # Graph Traversal & Analysis

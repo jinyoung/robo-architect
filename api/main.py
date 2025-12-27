@@ -381,6 +381,16 @@ async def get_context_full_tree(context_id: str) -> dict[str, Any]:
     ORDER BY pol.name
     """
     
+    # Get ReadModels for this BC
+    rm_query = """
+    MATCH (bc:BoundedContext {id: $context_id})-[:HAS_READMODEL]->(rm:ReadModel)
+    OPTIONAL MATCH (rm)-[:HAS_PROPERTY]->(prop:Property)
+    WITH rm, collect(prop {.id, .name, .type, .description, .isRequired}) as properties
+    RETURN rm {.id, .name, .description, .provisioningType, .cqrsConfig} as readmodel,
+           properties
+    ORDER BY rm.name
+    """
+    
     # Get Properties for all objects in this BC
     prop_query = """
     MATCH (bc:BoundedContext {id: $context_id})-[:HAS_AGGREGATE]->(agg:Aggregate)
@@ -456,6 +466,16 @@ async def get_context_full_tree(context_id: str) -> dict[str, Any]:
             pol["invokeCommandId"] = record["invokeCommandId"]
             policies.append(pol)
         
+        # ReadModels
+        rm_result = session.run(rm_query, context_id=context_id)
+        readmodels = []
+        for record in rm_result:
+            rm = dict(record["readmodel"])
+            rm["type"] = "ReadModel"
+            # Filter out null properties
+            rm["properties"] = [p for p in record["properties"] if p and p.get("id")]
+            readmodels.append(rm)
+        
         # Properties - organize by parent
         prop_result = session.run(prop_query, context_id=context_id)
         properties_by_parent = {}
@@ -482,6 +502,7 @@ async def get_context_full_tree(context_id: str) -> dict[str, Any]:
         bc["userStories"] = user_stories
         bc["aggregates"] = list(aggregates.values())
         bc["policies"] = policies
+        bc["readmodels"] = readmodels
         
         return bc
 
@@ -947,8 +968,10 @@ async def expand_node_with_bc(node_id: str) -> dict[str, Any]:
     OPTIONAL MATCH (bc3:BoundedContext)-[:HAS_AGGREGATE]->(agg:Aggregate)-[:HAS_COMMAND]->(n)
     OPTIONAL MATCH (bc4:BoundedContext)-[:HAS_AGGREGATE]->(agg2:Aggregate)-[:HAS_COMMAND]->(cmd:Command)-[:EMITS]->(n)
     OPTIONAL MATCH (bc5:BoundedContext)-[:HAS_POLICY]->(n)
+    OPTIONAL MATCH (bc6:BoundedContext)-[:HAS_UI]->(n)
+    OPTIONAL MATCH (bc7:BoundedContext)-[:HAS_READMODEL]->(n)
     
-    WITH n, nodeType, coalesce(bc1, bc2, bc3, bc4, bc5) as bc
+    WITH n, nodeType, coalesce(bc1, bc2, bc3, bc4, bc5, bc6, bc7) as bc
     RETURN n, nodeType, bc
     """
     
@@ -1060,6 +1083,49 @@ async def expand_node_with_bc(node_id: str) -> dict[str, Any]:
                             "target": record["invokeCommandId"],
                             "type": "INVOKES"
                         })
+            
+            # Get UI wireframes
+            ui_query = """
+            MATCH (bc:BoundedContext {id: $node_id})-[:HAS_UI]->(ui:UI)
+            RETURN ui
+            """
+            ui_result = session.run(ui_query, node_id=node_id)
+            
+            for record in ui_result:
+                if record["ui"] and record["ui"]["id"] not in seen_ids:
+                    ui = dict(record["ui"])
+                    ui["type"] = "UI"
+                    ui["bcId"] = node_id
+                    nodes.append(ui)
+                    seen_ids.add(ui["id"])
+                    
+                    # Add ATTACHED_TO relationship if attachedToId exists
+                    if ui.get("attachedToId"):
+                        relationships.append({
+                            "source": ui["id"],
+                            "target": ui["attachedToId"],
+                            "type": "ATTACHED_TO"
+                        })
+            
+            # Get ReadModels
+            rm_query = """
+            MATCH (bc:BoundedContext {id: $node_id})-[:HAS_READMODEL]->(rm:ReadModel)
+            RETURN rm
+            """
+            rm_result = session.run(rm_query, node_id=node_id)
+            
+            for record in rm_result:
+                if record["rm"] and record["rm"]["id"] not in seen_ids:
+                    rm = dict(record["rm"])
+                    rm["type"] = "ReadModel"
+                    rm["bcId"] = node_id
+                    nodes.append(rm)
+                    seen_ids.add(rm["id"])
+                    relationships.append({
+                        "source": node_id,
+                        "target": rm["id"],
+                        "type": "HAS_READMODEL"
+                    })
         
         elif node_type == "Aggregate":
             bc_id = bc["id"] if bc else None

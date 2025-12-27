@@ -85,3 +85,17 @@ ON EACH [us.role, us.action, us.benefit];
 CREATE FULLTEXT INDEX fulltext_requirement IF NOT EXISTS
 FOR (r:Requirement)
 ON EACH [r.title, r.description];
+
+// ------------------------------------------------------------
+// UI 인덱스
+// ------------------------------------------------------------
+
+// UI name 검색
+CREATE TEXT INDEX index_ui_name IF NOT EXISTS
+FOR (ui:UI)
+ON (ui.name);
+
+// UI attachedToId 검색 (부착된 Command/ReadModel 조회용)
+CREATE INDEX index_ui_attached IF NOT EXISTS
+FOR (ui:UI)
+ON (ui.attachedToId);

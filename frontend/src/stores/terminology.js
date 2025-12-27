@@ -13,7 +13,9 @@ export const useTerminologyStore = defineStore('terminology', () => {
         Aggregate: 'DB',
         Command: 'API',
         Policy: 'Service',
-        Event: 'Event' // Event stays the same
+        Event: 'Event', // Event stays the same
+        ReadModel: 'READ API',
+        UI: 'UI'
       }
     }
     return {
@@ -21,7 +23,9 @@ export const useTerminologyStore = defineStore('terminology', () => {
       Aggregate: 'Aggregate',
       Command: 'Command',
       Policy: 'Policy',
-      Event: 'Event'
+      Event: 'Event',
+      ReadModel: 'Read Model',
+      UI: 'UI'
     }
   })
   

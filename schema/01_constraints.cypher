@@ -103,3 +103,14 @@ REQUIRE prop.id IS UNIQUE;
 CREATE CONSTRAINT constraint_property_name IF NOT EXISTS
 FOR (prop:Property)
 REQUIRE prop.name IS NOT NULL;
+
+// ------------------------------------------------------------
+// UI: 와이어프레임 (Command/ReadModel에 부착)
+// ------------------------------------------------------------
+CREATE CONSTRAINT constraint_ui_id IF NOT EXISTS
+FOR (ui:UI)
+REQUIRE ui.id IS UNIQUE;
+
+CREATE CONSTRAINT constraint_ui_name IF NOT EXISTS
+FOR (ui:UI)
+REQUIRE ui.name IS NOT NULL;

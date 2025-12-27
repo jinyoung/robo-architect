@@ -34,7 +34,9 @@ class WorkflowPhase(str, Enum):
     EXTRACT_AGGREGATES = "extract_aggregates"
     APPROVE_AGGREGATES = "approve_aggregates"  # Human-in-the-loop
     EXTRACT_COMMANDS = "extract_commands"
+    EXTRACT_READMODELS = "extract_readmodels"  # After Commands, before Events
     EXTRACT_EVENTS = "extract_events"
+    GENERATE_UI = "generate_ui"  # After Events, generate UI wireframes
     IDENTIFY_POLICIES = "identify_policies"
     APPROVE_POLICIES = "approve_policies"  # Human-in-the-loop
     SAVE_TO_GRAPH = "save_to_graph"
@@ -115,8 +117,106 @@ class PropertyCandidate(BaseModel):
     type: str = Field(..., description="Data type like 'String', 'Integer', 'Date', 'Money', etc.")
     description: str = Field(default="", description="What this property represents")
     is_required: bool = Field(default=True, description="Whether this property is required")
-    parent_id: str = Field(..., description="ID of parent object (Command, Event, or Aggregate)")
-    parent_type: str = Field(..., description="Type of parent: 'Command', 'Event', or 'Aggregate'")
+    parent_id: str = Field(..., description="ID of parent object (Command, Event, Aggregate, or ReadModel)")
+    parent_type: str = Field(..., description="Type of parent: 'Command', 'Event', 'Aggregate', or 'ReadModel'")
+
+
+# =============================================================================
+# CQRS Configuration Models for ReadModel
+# =============================================================================
+
+
+class CQRSSetMapping(BaseModel):
+    """A single field mapping in CQRS SET clause."""
+
+    readModelField: str = Field(..., description="Field name in the ReadModel")
+    operator: str = Field(default="=", description="Operator (=, +=, etc.)")
+    source: str = Field(..., description="Source type: 'event' or 'value'")
+    eventField: Optional[str] = Field(default=None, description="Event field name if source is 'event'")
+    value: Optional[str] = Field(default=None, description="Static value if source is 'value'")
+
+
+class CQRSWhereCondition(BaseModel):
+    """WHERE condition for CQRS UPDATE/DELETE rules."""
+
+    readModelField: str = Field(..., description="ReadModel field to match")
+    operator: str = Field(default="=", description="Comparison operator")
+    eventField: str = Field(..., description="Event field to compare with")
+
+
+class CQRSRule(BaseModel):
+    """A single CQRS rule (CREATE/UPDATE/DELETE WHEN Event)."""
+
+    action: str = Field(..., description="Action type: 'CREATE', 'UPDATE', or 'DELETE'")
+    whenEvent: str = Field(..., description="Event ID that triggers this rule")
+    setMappings: List[CQRSSetMapping] = Field(
+        default_factory=list, description="Field mappings for SET clause"
+    )
+    whereCondition: Optional[CQRSWhereCondition] = Field(
+        default=None, description="WHERE condition (required for UPDATE/DELETE)"
+    )
+
+
+class CQRSConfig(BaseModel):
+    """CQRS configuration for a ReadModel."""
+
+    rules: List[CQRSRule] = Field(
+        default_factory=list, description="List of CQRS rules"
+    )
+
+
+class ReadModelCandidate(BaseModel):
+    """A candidate ReadModel (Query Model / Materialized View) for CQRS pattern."""
+
+    id: str = Field(..., description="Unique ID like RM-BCNAME-NAME")
+    name: str = Field(..., description="ReadModel name like 'MyPageOrderStatus'")
+    description: str = Field(..., description="What data this ReadModel provides")
+    provisioning_type: str = Field(
+        default="CQRS",
+        description="Data provisioning method: 'CQRS', 'API', 'GraphQL', 'SharedDB'"
+    )
+    source_bc_ids: List[str] = Field(
+        default_factory=list, description="BC IDs where source data comes from"
+    )
+    source_event_ids: List[str] = Field(
+        default_factory=list, description="Event IDs that populate this ReadModel (for CQRS)"
+    )
+    supports_command_ids: List[str] = Field(
+        default_factory=list, description="Command IDs that this ReadModel supports"
+    )
+    cqrs_config: Optional[CQRSConfig] = Field(
+        default=None, description="CQRS configuration with CREATE/UPDATE/DELETE rules"
+    )
+    user_story_ids: List[str] = Field(
+        default_factory=list, description="User Story IDs that require this ReadModel"
+    )
+
+
+class UICandidate(BaseModel):
+    """A UI wireframe candidate attached to Command or ReadModel."""
+
+    id: str = Field(..., description="Unique ID like UI-CMD-xxx or UI-RM-xxx")
+    name: str = Field(..., description="UI screen name like '주문 생성 화면'")
+    description: str = Field(default="", description="What this UI does")
+    template: str = Field(
+        default="",
+        description="Vue template HTML string for the wireframe"
+    )
+    attached_to_id: str = Field(
+        ..., description="ID of the Command or ReadModel this UI is attached to"
+    )
+    attached_to_type: str = Field(
+        ..., description="Type of attached node: 'Command' or 'ReadModel'"
+    )
+    attached_to_name: str = Field(
+        default="", description="Name of the attached Command or ReadModel"
+    )
+    user_story_id: Optional[str] = Field(
+        default=None, description="User Story ID that describes this UI"
+    )
+    user_story_ids: List[str] = Field(
+        default_factory=list, description="User Story IDs related to this UI"
+    )
 
 
 class UserStoryBreakdown(BaseModel):
@@ -184,6 +284,12 @@ class EventStormingState(BaseModel):
 
     # Event candidates per Command
     event_candidates: Dict[str, List[EventCandidate]] = Field(default_factory=dict)
+
+    # ReadModel candidates per BC (for CQRS/Query models)
+    readmodel_candidates: Dict[str, List["ReadModelCandidate"]] = Field(default_factory=dict)
+
+    # UI candidates per BC (for Command/ReadModel wireframes)
+    ui_candidates: Dict[str, List["UICandidate"]] = Field(default_factory=dict)
 
     # Policy candidates for cross-BC communication
     policy_candidates: List[PolicyCandidate] = Field(default_factory=list)

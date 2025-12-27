@@ -16,6 +16,7 @@ Your role is to help decompose software requirements into:
 - Commands: Actions that change state
 - Events: Facts that happened (past tense)
 - Policies: Reactions to events that trigger commands
+- ReadModels: Query models for CQRS pattern (Materialized Views)
 
 Follow these principles:
 1. Each Bounded Context should have a single, cohesive purpose
@@ -23,6 +24,7 @@ Follow these principles:
 3. Commands represent user intentions (verb form: CreateOrder)
 4. Events represent completed actions (past tense: OrderCreated)
 5. Policies connect BCs via event-driven communication
+6. ReadModels provide query data from external BCs for Commands
 
 When identifying Bounded Contexts, consider:
 - Domain expertise differences (different teams, different knowledge)
@@ -36,6 +38,7 @@ Use consistent naming conventions:
 - Command IDs: CMD-VERB-NOUN (e.g., CMD-CANCEL-ORDER)
 - Event IDs: EVT-NOUN-PASTVERB (e.g., EVT-ORDER-CANCELLED)
 - Policy IDs: POL-ACTION-ON-TRIGGER (e.g., POL-REFUND-ON-CANCEL)
+- ReadModel IDs: RM-BCNAME-NAME (e.g., RM-MYPAGE-ORDERSTATUS)
 """
 
 # =============================================================================
@@ -348,7 +351,7 @@ Related User Stories:
 
 Guidelines for identifying Command request body properties:
 1. Include all input parameters needed to execute this command
-2. Do NOT include identity fields that are in the URL path (e.g., orderId in /orders/{orderId}/cancel)
+2. Do NOT include identity fields that are in the URL path (e.g., orderId in /orders/{{orderId}}/cancel)
 3. Include payload data from the actor's input
 4. Use appropriate data types
 
@@ -389,4 +392,219 @@ For each Property, provide:
 - Brief description
 
 Output should be a list of PropertyCandidate objects."""
+
+# =============================================================================
+# ReadModel Extraction Prompts (CQRS / Query Model)
+# =============================================================================
+
+EXTRACT_READMODELS_PROMPT = """Identify ReadModels (Query Models / Materialized Views) needed for the Commands in this BC.
+
+Bounded Context: {bc_name} (ID: {bc_id})
+Description: {bc_description}
+
+Commands in this BC (with their required data):
+{commands}
+
+Other Bounded Contexts and their Events:
+{other_bc_events}
+
+User Stories:
+{user_stories}
+
+WHAT IS A READMODEL?
+A ReadModel is needed when a Command requires data from OTHER Bounded Contexts to execute.
+For example:
+- "PlaceOrder" command needs product information from Product BC
+- "CreateInvoice" command needs customer and order details from multiple BCs
+
+WHEN TO CREATE A READMODEL:
+1. User needs to VIEW data before executing a Command
+2. Command requires data that doesn't exist in the current BC
+3. Data needs to be queried/joined from multiple sources
+4. Performance requires pre-computed/cached data
+
+PROVISIONING TYPES:
+- CQRS: Subscribe to Events and maintain a local copy (Materialized View)
+- API: Call other BC's API at query time
+- GraphQL: Use GraphQL federation
+- SharedDB: Direct DB access (anti-pattern, use only for legacy)
+
+For each ReadModel, provide:
+- A unique ID: RM-BCNAME-NAME (e.g., RM-ORDER-PRODUCTCATALOG)
+- A descriptive name in PascalCase
+- What data it provides
+- Provisioning type (default: CQRS)
+- source_bc_ids: Which BCs the data comes from
+- source_event_ids: Which Events populate this ReadModel (for CQRS)
+- supports_command_ids: Which Commands use this data
+- user_story_ids: Which User Stories require this data
+
+Example for MyPage BC:
+- RM-MYPAGE-ORDERSTATUS: Aggregates order and delivery status
+  - Sources: BC-ORDER (OrderPlaced), BC-DELIVERY (DeliveryStarted, DeliveryCompleted)
+  - Supports: CMD-MYPAGE-VIEW-ORDERS
+
+IMPORTANT: Only create ReadModels when there's a clear need for external data.
+Don't create ReadModels for data that already exists in the local BC.
+
+NOTE: Do NOT generate cqrs_config in this step. Leave it as null/None.
+CQRS configuration will be added later through the UI after properties are defined.
+
+Output should be a list of ReadModelCandidate objects with the following fields:
+- id: Unique ID like RM-BCNAME-NAME
+- name: ReadModel name in PascalCase
+- description: What data this ReadModel provides
+- provisioning_type: One of 'CQRS', 'API', 'GraphQL', 'SharedDB' (default: 'CQRS')
+- source_bc_ids: List of BC IDs where data comes from
+- source_event_ids: List of Event IDs (can be empty, will be configured later)
+- supports_command_ids: List of Command IDs this ReadModel supports
+- user_story_ids: List of User Story IDs
+- cqrs_config: null (will be configured later via UI)"""
+
+EXTRACT_READMODEL_PROPERTIES_PROMPT = """Identify the properties (fields) for the ReadModel.
+
+ReadModel: {readmodel_name} (ID: {readmodel_id})
+Bounded Context: {bc_name}
+Description: {description}
+Provisioning Type: {provisioning_type}
+
+Source Events (for CQRS):
+{source_events}
+
+Commands this ReadModel supports:
+{supported_commands}
+
+User Stories:
+{user_stories}
+
+Guidelines for identifying ReadModel properties:
+1. Include fields needed by the supported Commands
+2. Include identifier fields for correlation (e.g., orderId, customerId)
+3. Include status/state fields that users need to see
+4. Include fields from source events that will populate this ReadModel
+5. Use appropriate data types (String, Long, Date, etc.)
+
+For CQRS, consider:
+- Which fields come from which source events
+- Which fields are set on CREATE vs UPDATE
+- Which fields are used as WHERE conditions
+
+For each Property, provide:
+- A unique ID: PROP-READMODEL_ID-FIELDNAME (e.g., PROP-RM-MYPAGE-ORDERID)
+- Field name in camelCase (e.g., orderId, productName, orderStatus)
+- Data type (String, Long, Integer, Date, Boolean, etc.)
+- Whether it's required (true/false)
+- Brief description
+
+Output should be a list of PropertyCandidate objects."""
+
+EXTRACT_CQRS_CONFIG_PROMPT = """Generate CQRS configuration for the ReadModel.
+
+ReadModel: {readmodel_name} (ID: {readmodel_id})
+Bounded Context: {bc_name}
+Description: {description}
+
+ReadModel Properties:
+{readmodel_properties}
+
+Source Events (with their properties):
+{source_events_with_properties}
+
+Generate CQRS rules that define:
+1. CREATE WHEN [Event]: Which event creates a new record in the ReadModel
+2. UPDATE WHEN [Event]: Which events update existing records
+3. For each rule, define SET mappings: readModelField = eventField or static value
+4. For UPDATE rules, define WHERE condition: readModelField = eventField
+
+Example Configuration:
+{{
+  "rules": [
+    {{
+      "action": "CREATE",
+      "whenEvent": "EVT-ORDER-PLACED",
+      "setMappings": [
+        {{"readModelField": "orderId", "operator": "=", "source": "event", "eventField": "id"}},
+        {{"readModelField": "productId", "operator": "=", "source": "event", "eventField": "productId"}},
+        {{"readModelField": "orderStatus", "operator": "=", "source": "value", "value": "주문됨"}}
+      ]
+    }},
+    {{
+      "action": "UPDATE",
+      "whenEvent": "EVT-DELIVERY-STARTED",
+      "setMappings": [
+        {{"readModelField": "deliveryStatus", "operator": "=", "source": "value", "value": "배송됨"}}
+      ],
+      "whereCondition": {{
+        "readModelField": "orderId",
+        "operator": "=",
+        "eventField": "orderId"
+      }}
+    }}
+  ]
+}}
+
+Output should be a CQRSConfig object."""
+
+# =============================================================================
+# UI Wireframe Generation Prompts
+# =============================================================================
+
+GENERATE_UI_PROMPT = """Generate a UI wireframe for the Command or ReadModel based on User Story requirements.
+
+Target: {target_type} - {target_name} (ID: {target_id})
+Bounded Context: {bc_name}
+Description: {description}
+
+User Story (with UI requirements):
+{user_story}
+
+Command/ReadModel Properties:
+{properties}
+
+Related Aggregate:
+{aggregate_info}
+
+Guidelines for generating UI wireframe:
+1. Create a simple, clean wireframe using Vue template HTML
+2. Use semantic HTML elements (form, input, button, label, etc.)
+3. Map properties to appropriate form fields
+4. Add placeholder text and labels in Korean
+5. Include action buttons (submit, cancel) for Commands
+6. Include data display sections for ReadModels
+7. Use CSS classes for styling: form-group, btn-group, etc.
+
+Template structure for COMMAND (input form):
+- Title/header showing the action
+- Form fields for each input property
+- Submit and Cancel buttons
+
+Template structure for READMODEL (data display):
+- Title/header showing what data is displayed
+- Data fields/sections
+- Refresh or action buttons if needed
+
+Generate a Vue template HTML string that can be rendered as a wireframe.
+The template should be self-contained and use only standard HTML elements.
+Do NOT include <script> or <style> tags - only template content.
+
+Example for PlaceOrder Command:
+<div class="wireframe">
+  <h2>주문하기</h2>
+  <form class="form">
+    <div class="form-group">
+      <label>상품</label>
+      <input type="text" placeholder="상품 선택" />
+    </div>
+    <div class="form-group">
+      <label>수량</label>
+      <input type="number" placeholder="1" />
+    </div>
+    <div class="btn-group">
+      <button type="submit">주문</button>
+      <button type="button">취소</button>
+    </div>
+  </form>
+</div>
+
+Output should be a UICandidate object with a valid 'template' field containing Vue template HTML."""
 

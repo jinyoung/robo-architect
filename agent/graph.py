@@ -39,6 +39,7 @@ from agent.nodes import (
     extract_aggregates_node,
     extract_commands_node,
     extract_events_node,
+    generate_ui_node,
     identify_bc_node,
     identify_policies_node,
     init_node,
@@ -136,6 +137,7 @@ def create_event_storming_graph(checkpointer=None):
     graph.add_node("approve_aggregates", approve_aggregates_node)
     graph.add_node("extract_commands", extract_commands_node)
     graph.add_node("extract_events", extract_events_node)
+    graph.add_node("generate_ui", generate_ui_node)
     graph.add_node("identify_policies", identify_policies_node)
     graph.add_node("approve_policies", approve_policies_node)
     graph.add_node("save_to_graph", save_to_graph_node)
@@ -194,9 +196,10 @@ def create_event_storming_graph(checkpointer=None):
         },
     )
 
-    # Commands -> Events -> Policies
+    # Commands -> Events -> UI -> Policies
     graph.add_edge("extract_commands", "extract_events")
-    graph.add_edge("extract_events", "identify_policies")
+    graph.add_edge("extract_events", "generate_ui")
+    graph.add_edge("generate_ui", "identify_policies")
     graph.add_edge("identify_policies", "approve_policies")
 
     # After policy approval

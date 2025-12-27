@@ -23,13 +23,21 @@
   --color-bc: #212529;
   --color-bc-bg: #f8f9fa;
   
-  --color-userstory: #20c997;
-  --color-userstory-light: #38d9a9;
-  --color-userstory-dark: #12b886;
+  --color-userstory: #74c0fc;
+  --color-userstory-light: #a5d8ff;
+  --color-userstory-dark: #4dabf7;
+  
+  --color-readmodel: #40c057;
+  --color-readmodel-light: #51cf66;
+  --color-readmodel-dark: #37b24d;
   
   --color-property: #868e96;
   --color-property-light: #adb5bd;
   --color-property-dark: #495057;
+  
+  --color-ui: #868e96;
+  --color-ui-light: #f8f9fa;
+  --color-ui-dark: #495057;
   
   /* UI Colors */
   --color-bg: #1a1b1e;
@@ -239,7 +247,12 @@ body {
 }
 
 .tree-node__icon--userstory {
-  background: #20c997;
+  background: var(--color-userstory);
+  font-size: 0.55rem;
+}
+
+.tree-node__icon--readmodel {
+  background: var(--color-readmodel);
   font-size: 0.55rem;
 }
 
@@ -641,6 +654,8 @@ body {
 .legend__color--event { background: var(--color-event); }
 .legend__color--aggregate { background: var(--color-aggregate); }
 .legend__color--policy { background: var(--color-policy); }
+.legend__color--readmodel { background: var(--color-readmodel); }
+.legend__color--userstory { background: var(--color-userstory); }
 
 /* ============================================
    Right Panel Container (Canvas + Chat)

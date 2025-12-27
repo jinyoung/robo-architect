@@ -54,3 +54,6 @@ yarn-error.log*
 coverage/
 .coverage
 htmlcov/
+
+# Cache
+.cache/
