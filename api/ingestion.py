@@ -16,6 +16,7 @@ import os
 import sys
 import uuid
 from dataclasses import dataclass, field
+from datetime import datetime
 from enum import Enum
 from pathlib import Path
 from typing import Any, AsyncGenerator, Optional
@@ -133,6 +134,8 @@ class IngestionSession:
     error: Optional[str] = None
     content: str = ""
     is_paused: bool = False  # Pause state
+    is_workflow_running: bool = False  # Track if workflow is already running
+    event_queues: list = field(default_factory=list)  # List of asyncio.Queue for subscribers
 
 
 # Active sessions
@@ -151,11 +154,19 @@ def create_session() -> IngestionSession:
 
 
 def add_event(session: IngestionSession, event: ProgressEvent):
-    """Add event to session and update status."""
-    session.events.append(event.model_dump())
+    """Add event to session, update status, and broadcast to subscribers."""
+    event_dict = event.model_dump()
+    session.events.append(event_dict)
     session.status = event.phase
     session.progress = event.progress
     session.message = event.message
+    
+    # Broadcast to all subscriber queues
+    for queue in session.event_queues:
+        try:
+            queue.put_nowait(event_dict)
+        except Exception:
+            pass  # Queue might be full or closed
 
 
 async def wait_if_paused(session: IngestionSession) -> bool:
@@ -1664,8 +1675,8 @@ async def get_session_status(session_id: str) -> dict[str, Any]:
     return {
         "active": True,
         "phase": session.status.value if session.status else "processing",
-        "message": last_event.message if last_event else "Processing...",
-        "progress": last_event.progress if last_event else 0,
+        "message": last_event.get("message", "Processing...") if last_event else "Processing...",
+        "progress": last_event.get("progress", 0) if last_event else 0,
         "isPaused": session.is_paused
     }
 
@@ -1677,39 +1688,85 @@ async def stream_progress(session_id: str, reconnect: bool = False):
     
     Client should connect after receiving session_id from /upload.
     If reconnect=true, will first replay all stored events before continuing.
+    Supports multiple clients connecting to the same session.
     """
     session = get_session(session_id)
     
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
     
+    # Create a queue for this subscriber
+    subscriber_queue = asyncio.Queue()
+    session.event_queues.append(subscriber_queue)
+    
     async def event_generator():
-        # If reconnecting, first replay all stored events
-        if reconnect and session.events:
-            for stored_event in session.events:
-                yield {
-                    "event": "progress",
-                    "data": stored_event.model_dump_json() if hasattr(stored_event, 'model_dump_json') else json.dumps(stored_event)
-                }
-                await asyncio.sleep(0.01)  # Small delay to not overwhelm client
+        try:
+            # If reconnecting, first replay all stored events
+            if reconnect and session.events:
+                for stored_event in session.events:
+                    yield {
+                        "event": "progress",
+                        "data": json.dumps(stored_event)
+                    }
+                    await asyncio.sleep(0.01)  # Small delay to not overwhelm client
+                
+                # If session is already complete or errored, don't continue
+                if session.status in (IngestionPhase.COMPLETE, IngestionPhase.ERROR):
+                    return
             
-            # If session is already complete or errored, don't run workflow again
-            if session.status in (IngestionPhase.COMPLETE, IngestionPhase.ERROR):
-                return
-        
-        # Run the workflow (or continue from where it left off)
-        if session.status not in (IngestionPhase.COMPLETE, IngestionPhase.ERROR):
-            async for event in run_ingestion_workflow(session, session.content):
-                add_event(session, event)
-                yield {
-                    "event": "progress",
-                    "data": event.model_dump_json()
-                }
-        
-        # Don't delete session immediately - keep for potential reconnection
-        # Session will expire naturally via the status check timeout
+            # Start workflow if not already running (first client)
+            if not session.is_workflow_running and session.status not in (IngestionPhase.COMPLETE, IngestionPhase.ERROR):
+                session.is_workflow_running = True
+                # Run workflow in background task
+                asyncio.create_task(run_workflow_background(session))
+            
+            # Listen for events from the queue
+            while True:
+                try:
+                    # Wait for event with timeout
+                    event_dict = await asyncio.wait_for(subscriber_queue.get(), timeout=30.0)
+                    yield {
+                        "event": "progress",
+                        "data": json.dumps(event_dict)
+                    }
+                    
+                    # Check if workflow is complete
+                    if event_dict.get("phase") in ("complete", "error"):
+                        break
+                        
+                except asyncio.TimeoutError:
+                    # Send heartbeat to keep connection alive
+                    yield {
+                        "event": "heartbeat",
+                        "data": json.dumps({"timestamp": datetime.now().isoformat()})
+                    }
+                    
+                    # Check if session is complete
+                    if session.status in (IngestionPhase.COMPLETE, IngestionPhase.ERROR):
+                        break
+        finally:
+            # Remove subscriber queue when client disconnects
+            if subscriber_queue in session.event_queues:
+                session.event_queues.remove(subscriber_queue)
     
     return EventSourceResponse(event_generator())
+
+
+async def run_workflow_background(session: IngestionSession):
+    """Run the ingestion workflow in the background and broadcast events."""
+    try:
+        async for event in run_ingestion_workflow(session, session.content):
+            add_event(session, event)
+    except Exception as e:
+        # Handle errors by sending error event
+        error_event = ProgressEvent(
+            phase=IngestionPhase.ERROR,
+            message=f"워크플로우 오류: {str(e)}",
+            progress=session.progress
+        )
+        add_event(session, error_event)
+    finally:
+        session.is_workflow_running = False
 
 
 @router.post("/{session_id}/pause")
