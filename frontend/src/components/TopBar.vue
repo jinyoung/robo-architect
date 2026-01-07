@@ -1,17 +1,49 @@
 <script setup>
-import { ref } from 'vue'
+import { ref, onMounted, onUnmounted } from 'vue'
 import { useCanvasStore } from '../stores/canvas'
 import { useTerminologyStore } from '../stores/terminology'
 import IngestionModal from './IngestionModal.vue'
 import PRDGeneratorModal from './PRDGeneratorModal.vue'
+import LegacyAnalysisModal from './LegacyAnalysisModal.vue'
+import SettingsModal from './SettingsModal.vue'
+import { getAppTitle } from '../config/appSettings'
 
 const canvasStore = useCanvasStore()
 const terminologyStore = useTerminologyStore()
 const showIngestionModal = ref(false)
 const showPRDModal = ref(false)
+const showLegacyModal = ref(false)
+const showSettingsModal = ref(false)
+const ingestionInitialText = ref('')
+const appTitle = ref(getAppTitle())
+
+// 타이틀 변경 이벤트 핸들러
+const handleAppTitleChange = (event) => {
+  appTitle.value = event.detail
+}
+
+onMounted(() => {
+  window.addEventListener('appTitleChange', handleAppTitleChange)
+})
+
+onUnmounted(() => {
+  window.removeEventListener('appTitleChange', handleAppTitleChange)
+})
 
 function handleIngestionComplete() {
   // Modal will trigger navigator refresh
+  ingestionInitialText.value = '' // 초기화
+}
+
+function handleLegacyComplete() {
+  // Modal will trigger navigator refresh
+}
+
+function handlePrdGenerated(prdContent) {
+  // LegacyAnalysisModal에서 PRD가 생성되면 IngestionModal 열기
+  ingestionInitialText.value = prdContent
+  showLegacyModal.value = false
+  showIngestionModal.value = true
 }
 </script>
 
@@ -19,7 +51,7 @@ function handleIngestionComplete() {
   <header class="top-bar">
     <div class="top-bar__logo">
       <div class="top-bar__logo-icon">RA</div>
-      <span>Robo Architect</span>
+      <span>{{ appTitle }}</span>
     </div>
     
     <div class="top-bar__divider"></div>
@@ -54,6 +86,20 @@ function handleIngestionComplete() {
         <polyline points="10 9 9 9 8 9"/>
       </svg>
       <span>PRD 생성</span>
+    </button>
+    
+    <!-- Legacy Analysis Button -->
+    <button 
+      class="legacy-btn"
+      @click="showLegacyModal = true"
+      title="레거시 시스템(테이블/SP)에서 Event Storming 도출"
+    >
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <path d="M12 3v18"/>
+        <path d="M18.7 8l-12 12"/>
+        <path d="M5.3 8l12 12"/>
+      </svg>
+      <span>레거시 분석</span>
     </button>
     
     <div class="top-bar__divider"></div>
@@ -97,9 +143,22 @@ function handleIngestionComplete() {
       </svg>
     </button>
     
+    <!-- Settings Button -->
+    <button 
+      class="canvas-toolbar__btn settings-btn"
+      @click="showSettingsModal = true"
+      title="설정"
+    >
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <circle cx="12" cy="12" r="3"/>
+        <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+      </svg>
+    </button>
+    
     <!-- Ingestion Modal -->
     <IngestionModal 
       v-model="showIngestionModal"
+      :initial-text="ingestionInitialText"
       @complete="handleIngestionComplete"
     />
     
@@ -107,6 +166,20 @@ function handleIngestionComplete() {
     <PRDGeneratorModal 
       :visible="showPRDModal"
       @close="showPRDModal = false"
+    />
+    
+    <!-- Legacy Analysis Modal -->
+    <LegacyAnalysisModal 
+      :visible="showLegacyModal"
+      @close="showLegacyModal = false"
+      @complete="handleLegacyComplete"
+      @prd-generated="handlePrdGenerated"
+    />
+    
+    <!-- Settings Modal -->
+    <SettingsModal 
+      :visible="showSettingsModal"
+      @close="showSettingsModal = false"
     />
   </header>
 </template>
@@ -167,6 +240,31 @@ function handleIngestionComplete() {
   cursor: not-allowed;
 }
 
+/* Legacy Analysis Button */
+.legacy-btn {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-sm);
+  padding: var(--spacing-sm) var(--spacing-md);
+  background: linear-gradient(135deg, #059669 0%, #10b981 100%);
+  border: none;
+  border-radius: var(--radius-md);
+  color: white;
+  font-size: 0.875rem;
+  font-weight: 500;
+  cursor: pointer;
+  transition: transform 0.15s, box-shadow 0.15s;
+}
+
+.legacy-btn:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 4px 12px rgba(5, 150, 105, 0.4);
+}
+
+.legacy-btn:active {
+  transform: translateY(0);
+}
+
 /* Developer Mode Toggle */
 .term-toggle {
   display: flex;
@@ -215,6 +313,16 @@ function handleIngestionComplete() {
 
 .term-toggle__switch.is-active .term-toggle__knob {
   transform: translateX(20px);
+}
+
+/* Settings Button */
+.settings-btn {
+  color: var(--color-text-light);
+}
+
+.settings-btn:hover {
+  color: var(--color-accent);
+  background: var(--color-bg-tertiary);
 }
 </style>
 

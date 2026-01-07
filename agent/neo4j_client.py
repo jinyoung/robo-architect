@@ -11,12 +11,15 @@ from __future__ import annotations
 import os
 from contextlib import contextmanager
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 from dotenv import load_dotenv
 from neo4j import Driver, GraphDatabase
 
-load_dotenv()
+# Load .env from project root
+env_path = Path(__file__).parent.parent / ".env"
+load_dotenv(env_path)
 
 
 @dataclass
@@ -25,7 +28,7 @@ class Neo4jConfig:
 
     uri: str = field(default_factory=lambda: os.getenv("NEO4J_URI", "bolt://localhost:7687"))
     user: str = field(default_factory=lambda: os.getenv("NEO4J_USER", "neo4j"))
-    password: str = field(default_factory=lambda: os.getenv("NEO4J_PASSWORD", "12345msaez"))
+    password: str = field(default_factory=lambda: os.getenv("NEO4J_PASSWORD", "12345analyzer"))
 
 
 class Neo4jClient:

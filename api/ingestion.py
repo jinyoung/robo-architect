@@ -1854,36 +1854,64 @@ async def list_sessions() -> list[dict[str, Any]]:
 @router.delete("/clear-all")
 async def clear_all_data() -> dict[str, Any]:
     """
-    Clear all nodes and relationships from Neo4j.
-    Used before starting a fresh ingestion.
+    Clear only Event Storming elements created by robo-architect.
+    Preserves legacy system data from robo-analyzer (Table, Column, PROCEDURE, etc.)
+    
+    삭제 대상 (robo-architect 생성):
+    - UserStory, BoundedContext, Aggregate, Command, Event, Policy
+    - ReadModel, UI, Property, CQRSConfig, CQRSOperation
+    
+    보존 대상 (robo-analyzer 생성):
+    - Table, Column, PROCEDURE, FUNCTION, TRIGGER, Variable, Parameter
     """
     from agent.neo4j_client import get_neo4j_client
     
     client = get_neo4j_client()
     
+    # robo-architect에서 생성하는 노드 타입들
+    ARCHITECT_NODE_TYPES = [
+        'UserStory',
+        'AcceptanceCriteria',
+        'BoundedContext', 
+        'Aggregate',
+        'Command',
+        'Event',
+        'Policy',
+        'ReadModel',
+        'UI',
+        'Property',
+        'CQRSConfig',
+        'CQRSOperation'
+    ]
+    
     try:
         with client.session() as session:
-            # Get counts before deletion
+            # Get counts before deletion (only architect nodes)
             count_query = """
             MATCH (n)
+            WHERE labels(n)[0] IN $node_types
             WITH labels(n)[0] as label, count(n) as count
             RETURN collect({label: label, count: count}) as counts
             """
-            result = session.run(count_query)
+            result = session.run(count_query, node_types=ARCHITECT_NODE_TYPES)
             record = result.single()
             before_counts = {item["label"]: item["count"] for item in record["counts"]} if record else {}
             
-            # Delete all nodes and relationships
+            # Delete only robo-architect created nodes
             delete_query = """
             MATCH (n)
+            WHERE labels(n)[0] IN $node_types
             DETACH DELETE n
             """
-            session.run(delete_query)
+            session.run(delete_query, node_types=ARCHITECT_NODE_TYPES)
+            
+            total_deleted = sum(before_counts.values())
             
             return {
                 "success": True,
-                "message": "모든 데이터가 삭제되었습니다",
-                "deleted": before_counts
+                "message": f"Event Storming 요소 {total_deleted}개가 삭제되었습니다 (레거시 데이터는 보존됨)",
+                "deleted": before_counts,
+                "preserved_types": ["Table", "Column", "PROCEDURE", "FUNCTION", "TRIGGER", "Variable"]
             }
     except Exception as e:
         return {

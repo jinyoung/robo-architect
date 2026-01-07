@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import os
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Any, Optional
 
 from dotenv import load_dotenv
@@ -21,12 +22,14 @@ from pydantic import BaseModel
 
 from agent.neo4j_client import get_neo4j_client
 
-load_dotenv()
+# Load .env from project root
+env_path = Path(__file__).parent.parent / ".env"
+load_dotenv(env_path)
 
 # Neo4j Configuration
 NEO4J_URI = os.getenv("NEO4J_URI", "bolt://localhost:7687")
 NEO4J_USER = os.getenv("NEO4J_USER", "neo4j")
-NEO4J_PASSWORD = os.getenv("NEO4J_PASSWORD", "12345msaez")
+NEO4J_PASSWORD = os.getenv("NEO4J_PASSWORD", "12345analyzer")
 
 driver = None
 
@@ -73,6 +76,10 @@ app.include_router(chat_router)
 from api.prd_generator import router as prd_router
 app.include_router(prd_router)
 
+# Include legacy analysis router (Event Storming from Tables/SP)
+from api.legacy_analysis import router as legacy_router
+app.include_router(legacy_router)
+
 
 def get_session():
     """Get a Neo4j session."""
@@ -95,75 +102,65 @@ async def health_check():
         return {"status": "unhealthy", "error": str(e)}
 
 
-@app.delete("/api/graph/clear")
-async def clear_all_nodes():
-    """
-    DELETE /graph/clear - 모든 노드와 관계 삭제
-    새로운 인제스션 전에 기존 데이터를 모두 삭제합니다.
-    """
-    query = """
-    MATCH (n)
-    DETACH DELETE n
-    """
-    with get_session() as session:
-        result = session.run(query)
-        summary = result.consume()
-        return {
-            "status": "cleared",
-            "nodes_deleted": summary.counters.nodes_deleted,
-            "relationships_deleted": summary.counters.relationships_deleted
-        }
-
-
-@app.get("/api/graph/stats")
-async def get_graph_stats():
-    """
-    GET /graph/stats - 그래프 통계 조회
-    현재 Neo4j에 저장된 노드 수를 반환합니다.
-    """
-    query = """
-    MATCH (n)
-    WITH labels(n)[0] as label, count(n) as count
-    RETURN collect({label: label, count: count}) as stats
-    """
-    with get_session() as session:
-        result = session.run(query)
-        record = result.single()
-        if record:
-            stats = {item["label"]: item["count"] for item in record["stats"] if item["label"]}
-            total = sum(stats.values())
-            return {"total": total, "by_type": stats}
-        return {"total": 0, "by_type": {}}
+# robo-architect에서 생성하는 노드 타입들 (삭제 대상)
+ARCHITECT_NODE_TYPES = [
+    'UserStory',
+    'AcceptanceCriteria',
+    'BoundedContext', 
+    'Aggregate',
+    'Command',
+    'Event',
+    'Policy',
+    'ReadModel',
+    'UI',
+    'Property',
+    'CQRSConfig',
+    'CQRSOperation'
+]
 
 
 @app.delete("/api/graph/clear")
-async def clear_all_nodes():
+async def clear_architect_nodes():
     """
-    DELETE /graph/clear - 모든 노드 삭제
-    Clears all nodes and relationships from the graph.
-    Used before starting a new ingestion.
-    """
-    query = """
-    MATCH (n)
-    DETACH DELETE n
+    DELETE /graph/clear - Event Storming 요소만 삭제 (robo-architect 생성 노드)
+    
+    삭제 대상: UserStory, BoundedContext, Aggregate, Command, Event, Policy, 
+              ReadModel, UI, Property, CQRSConfig, CQRSOperation
+    
+    보존 대상: Table, Column, PROCEDURE, FUNCTION, TRIGGER, Variable (robo-analyzer 생성)
     """
     count_query = """
     MATCH (n)
-    RETURN count(n) as count
+    WHERE labels(n)[0] IN $node_types
+    WITH labels(n)[0] as label, count(n) as count
+    RETURN collect({label: label, count: count}) as counts
+    """
+    
+    delete_query = """
+    MATCH (n)
+    WHERE labels(n)[0] IN $node_types
+    DETACH DELETE n
     """
     
     with get_session() as session:
-        # Get count before deletion
-        count_result = session.run(count_query)
-        count_before = count_result.single()["count"]
+        # Get counts before deletion
+        result = session.run(count_query, node_types=ARCHITECT_NODE_TYPES)
+        record = result.single()
+        before_counts = {item["label"]: item["count"] for item in record["counts"]} if record else {}
+        total_before = sum(before_counts.values())
         
-        # Delete all nodes
-        session.run(query)
+        # Delete only architect nodes
+        delete_result = session.run(delete_query, node_types=ARCHITECT_NODE_TYPES)
+        summary = delete_result.consume()
         
         return {
             "success": True,
-            "deleted_nodes": count_before,
-            "message": f"Deleted {count_before} nodes and all relationships"
+            "status": "cleared",
+            "nodes_deleted": summary.counters.nodes_deleted,
+            "relationships_deleted": summary.counters.relationships_deleted,
+            "deleted_by_type": before_counts,
+            "message": f"Event Storming 요소 {total_before}개 삭제됨 (레거시 데이터 보존)",
+            "preserved_types": ["Table", "Column", "PROCEDURE", "FUNCTION", "TRIGGER", "Variable"]
         }
 
 

@@ -6,6 +6,10 @@ const props = defineProps({
   modelValue: {
     type: Boolean,
     default: false
+  },
+  initialText: {
+    type: String,
+    default: ''
   }
 })
 
@@ -161,6 +165,12 @@ watch(isOpen, async (newVal) => {
       checkExistingData(),
       checkCacheStatus()
     ])
+    
+    // initialText가 있으면 텍스트 모드로 전환하고 내용 채우기
+    if (props.initialText && props.initialText.trim()) {
+      inputMode.value = 'text'
+      textContent.value = props.initialText
+    }
   }
 })
 
