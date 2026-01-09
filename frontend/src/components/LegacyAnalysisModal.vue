@@ -10,8 +10,9 @@ const props = defineProps({
 
 const emit = defineEmits(['update:visible', 'close', 'complete', 'prd-generated'])
 
-// API URL
-const API_BASE = 'http://localhost:8000'
+// API Gateway URL
+const API_GATEWAY_URL = import.meta.env.VITE_API_GATEWAY_URL ?? 'http://localhost:9000'
+const API_BASE = `${API_GATEWAY_URL}/architect`
 
 // State
 const phase = ref('idle') // idle, generating_prd, prd_ready, error
