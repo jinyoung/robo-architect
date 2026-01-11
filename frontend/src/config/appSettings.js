@@ -67,3 +67,5 @@ export function initializeAppSettings() {
   document.title = title
 }
 
+
+
